@@ -1,0 +1,160 @@
+#!/usr/bin/python3
+
+import argparse
+import fcntl
+import html
+import json
+import os
+import shutil
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+
+HOME = Path.home()
+STATE_DIR = HOME / ".local/state/codex-notify"
+ID_FILE = STATE_DIR / "desktop-notification-id"
+LOCK_FILE = STATE_DIR / "desktop-notification.lock"
+LOG_FILE = STATE_DIR / "desktop-delivery.log"
+LOG_LOCK_FILE = STATE_DIR / "desktop-delivery-log.lock"
+MAX_LOG_BYTES = 1024 * 1024
+RECENT_EVENTS_FILE = STATE_DIR / "desktop-recent-events"
+EVENT_LOCK_FILE = STATE_DIR / "desktop-events.lock"
+APP_ICON = HOME / ".local/share/icons/hicolor/scalable/apps/dev.rayan.codexalert.svg"
+SOUND = Path("/usr/share/sounds/freedesktop/stereo/complete.oga")
+NOTIFY_SEND = shutil.which("notify-send") or "/usr/bin/notify-send"
+PW_PLAY = shutil.which("pw-play")
+
+
+def clean_environment():
+    env = os.environ.copy()
+    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"):
+        env.pop(key, None)
+    return env
+
+
+def log(**record):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        record["time"] = datetime.now().isoformat(timespec="seconds")
+        with LOG_LOCK_FILE.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size >= MAX_LOG_BYTES:
+                previous = LOG_FILE.with_suffix(LOG_FILE.suffix + ".1")
+                previous.unlink(missing_ok=True)
+                LOG_FILE.replace(previous)
+            with LOG_FILE.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def notify(title, body):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            replace_id = int(ID_FILE.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            replace_id = 0
+
+        command = [
+            NOTIFY_SEND,
+            "--print-id",
+            f"--replace-id={replace_id}",
+            "--app-name=Codex",
+            f"--app-icon={APP_ICON}",
+            f"--icon={APP_ICON}",
+            "--urgency=normal",
+            html.escape(title, quote=False),
+            html.escape(body, quote=False),
+        ]
+        result = subprocess.run(
+            command,
+            env=clean_environment(),
+            check=False,
+            timeout=3,
+            capture_output=True,
+            text=True,
+        )
+        new_id = result.stdout.strip()
+        if result.returncode == 0 and new_id.isdigit():
+            ID_FILE.write_text(new_id + "\n", encoding="ascii")
+        return result.returncode, result.stderr.strip(), new_id
+
+
+def play_sound():
+    if not PW_PLAY:
+        return None, "pw-play not installed"
+    if not SOUND.exists():
+        return None, "sound file missing"
+    result = subprocess.run(
+        [PW_PLAY, str(SOUND)],
+        env=clean_environment(),
+        check=False,
+        timeout=3,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode, result.stderr.strip()
+
+
+def remember_event(event_id):
+    if not event_id:
+        return True
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with EVENT_LOCK_FILE.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            recent = RECENT_EVENTS_FILE.read_text(encoding="ascii").splitlines()
+        except OSError:
+            recent = []
+        if event_id in recent:
+            return False
+        RECENT_EVENTS_FILE.write_text(
+            "\n".join([event_id, *recent[:127]]) + "\n", encoding="ascii"
+        )
+        return True
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--body", required=True)
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--event-id")
+    args = parser.parse_args()
+
+    if not remember_event(args.event_id):
+        log(event="desktop-duplicate-ignored", event_id=args.event_id,
+            account=args.account, project=args.project)
+        return 0
+
+    try:
+        notify_rc, notify_error, notification_id = notify(args.title, args.body)
+    except Exception as exc:
+        notify_rc, notify_error, notification_id = 1, repr(exc), ""
+
+    try:
+        sound_rc, sound_error = play_sound()
+    except Exception as exc:
+        sound_rc, sound_error = 1, repr(exc)
+
+    log(
+        event="desktop-delivery",
+        event_id=args.event_id,
+        account=args.account,
+        project=args.project,
+        notification_id=notification_id,
+        notify_returncode=notify_rc,
+        notify_error=notify_error,
+        sound_returncode=sound_rc,
+        sound_error=sound_error,
+    )
+    return 0 if notify_rc == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

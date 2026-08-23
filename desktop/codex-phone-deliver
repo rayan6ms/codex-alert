@@ -1,0 +1,727 @@
+#!/usr/bin/python3
+
+"""Durable, event-driven delivery of Codex completion alerts to Android."""
+
+import argparse
+import fcntl
+import http.client
+import json
+import os
+import socket
+import sqlite3
+import ssl
+import subprocess
+import sys
+import time
+import uuid
+from contextlib import closing
+from datetime import datetime
+from pathlib import Path
+
+from codex_alert_common import (
+    CERTIFICATE_FILE,
+    PHONE_FILE,
+    STATE_DIR,
+    TOKEN_FILE,
+    phone,
+)
+
+
+HOME = Path.home()
+SYSTEMCTL = "/usr/bin/systemctl"
+PORT = 24601
+DB_FILE = STATE_DIR / "phone-queue.sqlite3"
+LOCK_FILE = STATE_DIR / "phone-worker.lock"
+STATUS_FILE = STATE_DIR / "phone-status.json"
+LOG_FILE = STATE_DIR / "phone-delivery.log"
+ACTIVE_ALERT_FILE = STATE_DIR / "phone-active-alert.json"
+STATUS_NOTIFICATION_ID_FILE = STATE_DIR / "phone-status-notification-id"
+WAKE_SOCKET = STATE_DIR / "phone-worker.sock"
+SERVICE = "codex-phone-delivery.service"
+CLEAR_SERVICE = "codex-phone-clear-on-input.service"
+CLEAR_PATH = "codex-phone-clear-on-input.path"
+PRESENCE_FILE = Path("/run/codex-presence/last-input-ns")
+DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
+RETRY_DELAYS = (5, 15, 30, 60)
+MAX_LOG_BYTES = 1024 * 1024
+
+
+def clean_environment():
+    env = os.environ.copy()
+    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"):
+        env.pop(key, None)
+    return env
+
+
+def compact(value, limit):
+    value = str(value or "").strip()
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def rotate_log():
+    try:
+        if LOG_FILE.stat().st_size < MAX_LOG_BYTES:
+            return
+        older = LOG_FILE.with_suffix(LOG_FILE.suffix + ".2")
+        previous = LOG_FILE.with_suffix(LOG_FILE.suffix + ".1")
+        older.unlink(missing_ok=True)
+        if previous.exists():
+            previous.replace(older)
+        LOG_FILE.replace(previous)
+    except OSError:
+        pass
+
+
+def log(**record):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        rotate_log()
+        record["time"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        with LOG_FILE.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def connect_db():
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    connection = sqlite3.connect(DB_FILE, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout=10000")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS delivery_queue (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            account TEXT NOT NULL,
+            project TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at REAL,
+            next_attempt_at REAL NOT NULL,
+            last_error TEXT NOT NULL DEFAULT '',
+            presence_baseline INTEGER,
+            environment_id TEXT NOT NULL DEFAULT '',
+            thread_id TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(delivery_queue)")
+    }
+    if "presence_baseline" not in columns:
+        connection.execute("ALTER TABLE delivery_queue ADD COLUMN presence_baseline INTEGER")
+    if "environment_id" not in columns:
+        connection.execute(
+            "ALTER TABLE delivery_queue ADD COLUMN environment_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "thread_id" not in columns:
+        connection.execute(
+            "ALTER TABLE delivery_queue ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS delivery_history (
+            id TEXT PRIMARY KEY,
+            delivered_at REAL NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    try:
+        DB_FILE.chmod(0o600)
+    except OSError:
+        pass
+    return connection
+
+
+def load_status():
+    try:
+        value = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_status(**changes):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        status = load_status()
+        status.update(changes)
+        status["updated_at"] = time.time()
+        temporary = STATUS_FILE.with_name(f"{STATUS_FILE.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(STATUS_FILE)
+    except OSError:
+        pass
+
+
+def queue_depth(connection):
+    return int(connection.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0])
+
+
+def physical_input_stamp():
+    try:
+        return int(PRESENCE_FILE.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def load_active_alert():
+    try:
+        value = json.loads(ACTIVE_ALERT_FILE.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("event_id"):
+            return value
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_active_alert(event_id, baseline):
+    # Pre-1.0 installations may provide an optional physical-input timestamp
+    # monitor. Fresh public installations do not need privileged input access.
+    if baseline is None:
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    value = {
+        "event_id": event_id,
+        "presence_baseline": baseline,
+        "delivered_at": time.time(),
+    }
+    temporary = ACTIVE_ALERT_FILE.with_name(
+        f"{ACTIVE_ALERT_FILE.name}.{os.getpid()}.tmp"
+    )
+    temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(ACTIVE_ALERT_FILE)
+    run([SYSTEMCTL, "--user", "start", "--no-block", CLEAR_PATH], 3)
+    run([SYSTEMCTL, "--user", "start", "--no-block", CLEAR_SERVICE], 3)
+
+
+def stop_clear_watcher():
+    run([SYSTEMCTL, "--user", "stop", "--no-block", CLEAR_PATH], 3)
+
+
+def run(command, timeout):
+    try:
+        result = subprocess.run(
+            command,
+            env=clean_environment(),
+            check=False,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode, result.stderr.strip(), result.stdout.strip()
+    except Exception as exc:
+        return None, repr(exc), ""
+
+
+def load_token():
+    try:
+        token = TOKEN_FILE.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise RuntimeError(f"missing phone token: {TOKEN_FILE}") from exc
+    if len(token) != 64 or any(character not in "0123456789abcdef" for character in token):
+        raise RuntimeError(f"invalid phone token: {TOKEN_FILE}")
+    return token
+
+
+def discover_lan_targets():
+    binary = Path("/usr/bin/avahi-browse")
+    if not binary.exists():
+        return []
+    returncode, _, output = run(
+        [str(binary), "--resolve", "--terminate", "--parsable", "_codexalert._tcp"], 2
+    )
+    if returncode != 0:
+        return []
+    targets = []
+    for line in output.splitlines():
+        fields = line.split(";")
+        if len(fields) >= 9 and fields[0] == "=" and fields[2] == "IPv4":
+            host = fields[7].strip()
+            port = fields[8].strip()
+            if host and port == str(PORT):
+                targets.append(("lan-mdns", host))
+    return targets
+
+
+def direct_targets(skip_lan=False, skip_tailscale=False):
+    """Yield paired and discovered targets without embedding device addresses."""
+    seen = set()
+    if not skip_lan:
+        for host in phone().get("targets", []):
+            host = str(host).strip()
+            transport = transport_for_host(host)
+            if transport != "lan-direct":
+                continue
+            if host not in seen:
+                seen.add(host)
+                yield transport, host
+        for transport, host in discover_lan_targets():
+            if host not in seen:
+                seen.add(host)
+                yield transport, host
+    if skip_tailscale:
+        return
+    for host in phone().get("targets", []):
+        host = str(host).strip()
+        transport = transport_for_host(host)
+        if transport != "tailscale-direct":
+            continue
+        if host not in seen:
+            seen.add(host)
+            yield transport, host
+
+
+def transport_for_host(host):
+    value = host.strip("[]").lower()
+    try:
+        address = __import__("ipaddress").ip_address(value.split("%", 1)[0])
+        if address in __import__("ipaddress").ip_network("100.64.0.0/10"):
+            return "tailscale-direct"
+        if address.version == 6 and value.startswith("fd7a:115c:a1e0:"):
+            return "tailscale-direct"
+    except ValueError:
+        if value.endswith(".ts.net"):
+            return "tailscale-direct"
+    return "lan-direct"
+
+
+def tls_context():
+    if not CERTIFICATE_FILE.is_file():
+        raise RuntimeError(f"missing pinned phone certificate: {CERTIFICATE_FILE}")
+    context = ssl.create_default_context(cafile=str(CERTIFICATE_FILE))
+    # The exact self-signed certificate is pinned. Its subject intentionally
+    # does not depend on a changeable LAN IP or Tailscale hostname.
+    context.check_hostname = False
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def try_request(
+        host, transport, event_id, payload_value, token, context,
+        path, accepted_statuses, log_event,
+):
+    payload = json.dumps(
+        payload_value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    connection = http.client.HTTPSConnection(host, PORT, timeout=4, context=context)
+    try:
+        connection.request(
+            "POST", path, body=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+                "Content-Length": str(len(payload)),
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        body = response.read(4096).decode("utf-8", errors="replace")
+        try:
+            result = json.loads(body).get("status", "invalid-response")
+        except (TypeError, ValueError):
+            result = "invalid-response"
+        success = response.status == 200 and result in accepted_statuses
+        error = "" if success else f"HTTP {response.status}: {result}"
+        log(event=log_event, event_id=event_id, transport=transport,
+            target=host, success=success, returncode=response.status,
+            error=error, output=compact(body, 500))
+        return success, error, result
+    except Exception as exc:
+        error = compact(f"{type(exc).__name__}: {exc}", 500)
+        log(event=log_event, event_id=event_id, transport=transport,
+            target=host, success=False, returncode=None, error=error, output="")
+        return False, error, ""
+    finally:
+        connection.close()
+
+
+def try_direct(host, transport, event, token, context):
+    success, error, _ = try_request(
+        host,
+        transport,
+        event["id"],
+        {
+            "id": event["id"],
+            "title": event["title"],
+            "body": event["body"],
+            "environment_id": event["environment_id"],
+            "thread_id": event["thread_id"],
+            "completed_at_ms": int(event["created_at"] * 1000),
+            "sent_at_ms": int(time.time() * 1000),
+        },
+        token,
+        context,
+        "/v1/alert",
+        ("ok", "duplicate"),
+        "delivery-attempt",
+    )
+    return success, error
+
+
+def deliver(event):
+    try:
+        token = load_token()
+        context = tls_context()
+    except Exception as exc:
+        return False, "", compact(str(exc), 1200)
+
+    errors = []
+    skip_lan = os.environ.get("CODEX_ALERT_SKIP_LAN") == "1"
+    skip_tailscale = os.environ.get("CODEX_ALERT_SKIP_TAILSCALE") == "1"
+    for transport, host in direct_targets(skip_lan, skip_tailscale):
+        success, error = try_direct(host, transport, event, token, context)
+        if success:
+            return True, transport, ""
+        errors.append(f"{transport} {host}: {error}")
+
+    error = " | ".join(filter(None, errors))
+    return False, "", compact(error or "all direct app targets are unavailable", 1200)
+
+
+def clear_event(event_id):
+    try:
+        token = load_token()
+        context = tls_context()
+    except Exception as exc:
+        return False, "", compact(str(exc), 1200)
+
+    errors = []
+    for transport, host in direct_targets():
+        success, error, result = try_request(
+            host, transport, event_id, {"id": event_id}, token, context,
+            "/v1/clear", ("cleared", "stale", "already-clear"), "clear-attempt",
+        )
+        if success:
+            return True, transport, result
+        errors.append(f"{transport} {host}: {error}")
+    return False, "", compact(" | ".join(errors), 1200)
+
+
+def clear_active_alert():
+    active = load_active_alert()
+    if active is None:
+        stop_clear_watcher()
+        return 0
+    current_stamp = physical_input_stamp()
+    baseline = active.get("presence_baseline")
+    if current_stamp is None or baseline is None or current_stamp <= baseline:
+        return 0
+
+    event_id = str(active["event_id"])
+    success, transport, result = clear_event(event_id)
+    if not success:
+        log(event="clear-deferred", event_id=event_id, error=result)
+        return 1
+
+    # Do not erase state for a newer completion that arrived during the request.
+    current = load_active_alert()
+    if current is not None and current.get("event_id") == event_id:
+        ACTIVE_ALERT_FILE.unlink(missing_ok=True)
+        stop_clear_watcher()
+    log(event="cleared-on-desktop-input", event_id=event_id,
+        transport=transport, result=result)
+    return 0
+
+
+def notify_delivery_problem(depth, error):
+    try:
+        previous = int(STATUS_NOTIFICATION_ID_FILE.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        previous = 0
+    result = subprocess.run(
+        [
+            "/usr/bin/notify-send", "--print-id", f"--replace-id={previous}",
+            "--app-name=Codex", "--urgency=low",
+            "Phone alerts are waiting",
+            f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
+        ],
+        env=clean_environment(), check=False, timeout=3, capture_output=True, text=True,
+    )
+    notification_id = result.stdout.strip()
+    if result.returncode == 0 and notification_id.isdigit():
+        STATUS_NOTIFICATION_ID_FILE.write_text(notification_id + "\n", encoding="ascii")
+
+
+def clear_delivery_problem():
+    try:
+        notification_id = int(STATUS_NOTIFICATION_ID_FILE.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return
+    subprocess.run(
+        [
+            "/usr/bin/gdbus", "call", "--session",
+            "--dest", "org.freedesktop.Notifications",
+            "--object-path", "/org/freedesktop/Notifications",
+            "--method", "org.freedesktop.Notifications.CloseNotification",
+            str(notification_id),
+        ],
+        env=clean_environment(), check=False, timeout=3,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    STATUS_NOTIFICATION_ID_FILE.unlink(missing_ok=True)
+
+
+def activate_worker():
+    try:
+        wake = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            wake.sendto(b"wake", str(WAKE_SOCKET))
+            return True
+        finally:
+            wake.close()
+    except OSError:
+        pass
+
+    start = subprocess.run(
+        [SYSTEMCTL, "--user", "start", "--no-block", SERVICE],
+        env=clean_environment(), check=False, timeout=3,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    if start.returncode == 0:
+        return True
+
+    try:
+        subprocess.Popen(
+            [str(Path(__file__).resolve()), "worker"],
+            env=clean_environment(), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+        )
+        log(event="systemd-start-fallback", error=compact(start.stderr, 500))
+        return True
+    except Exception as exc:
+        log(event="worker-start-failed", error=repr(exc))
+        return False
+
+
+def enqueue(args):
+    now = time.time()
+    event_id = args.event_id or str(uuid.uuid4())
+    presence_baseline = physical_input_stamp()
+    with closing(connect_db()) as connection:
+        connection.execute(
+            "DELETE FROM delivery_history WHERE delivered_at < ?",
+            (now - DEFAULT_TTL_SECONDS,),
+        )
+        if connection.execute(
+                "SELECT 1 FROM delivery_history WHERE id = ?", (event_id,)
+        ).fetchone():
+            connection.commit()
+            log(event="duplicate-already-delivered", event_id=event_id)
+            return 0
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO delivery_queue
+            (id, title, body, account, project, created_at, expires_at,
+             next_attempt_at, presence_baseline, environment_id, thread_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, compact(args.title, 240), compact(args.body, 2400),
+                compact(args.account, 120), compact(args.project, 240),
+                now, now + args.ttl_hours * 3600, now, presence_baseline,
+                compact(args.environment_id, 128), compact(args.thread_id, 128),
+            ),
+        )
+        connection.execute(
+            "UPDATE delivery_queue SET next_attempt_at = MIN(next_attempt_at, ?)", (now,)
+        )
+        connection.commit()
+        depth = queue_depth(connection)
+    save_status(state="queued", queue_depth=depth)
+    started = activate_worker()
+    log(event="queued", event_id=event_id, account=args.account,
+        project=args.project, queue_depth=depth, worker_started=started)
+    return 0 if started else 1
+
+
+def next_event(connection):
+    return connection.execute(
+        "SELECT * FROM delivery_queue ORDER BY created_at, rowid LIMIT 1"
+    ).fetchone()
+
+
+def worker():
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with LOCK_FILE.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+
+        WAKE_SOCKET.unlink(missing_ok=True)
+        wake = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        wake.bind(str(WAKE_SOCKET))
+        WAKE_SOCKET.chmod(0o600)
+        connection = connect_db()
+        # Starting the service explicitly (at login, after recovery, or by an
+        # operator) is a strong signal to retry now instead of preserving an
+        # old backoff deadline.
+        connection.execute(
+            "UPDATE delivery_queue SET next_attempt_at = MIN(next_attempt_at, ?)", (time.time(),)
+        )
+        connection.commit()
+        log(event="worker-started")
+        try:
+            while True:
+                event = next_event(connection)
+                if event is None:
+                    save_status(state="ready", queue_depth=0, next_retry_at=None, last_error="")
+                    clear_delivery_problem()
+                    log(event="worker-idle")
+                    return 0
+
+                now = time.time()
+                if event["expires_at"] <= now:
+                    connection.execute("DELETE FROM delivery_queue WHERE id = ?", (event["id"],))
+                    connection.commit()
+                    log(event="expired", event_id=event["id"], attempts=event["attempts"])
+                    continue
+
+                if event["next_attempt_at"] > now:
+                    save_status(
+                        state="waiting", queue_depth=queue_depth(connection),
+                        next_retry_at=event["next_attempt_at"], last_error=event["last_error"],
+                    )
+                    wake.settimeout(min(event["next_attempt_at"] - now, RETRY_DELAYS[-1]))
+                    try:
+                        wake.recv(16)
+                    except socket.timeout:
+                        pass
+                    continue
+
+                success, transport, error = deliver(event)
+                if success:
+                    save_active_alert(event["id"], event["presence_baseline"])
+                    connection.execute(
+                        "INSERT OR REPLACE INTO delivery_history (id, delivered_at) VALUES (?, ?)",
+                        (event["id"], time.time()),
+                    )
+                    connection.execute("DELETE FROM delivery_queue WHERE id = ?", (event["id"],))
+                    connection.commit()
+                    depth = queue_depth(connection)
+                    save_status(
+                        state="ready" if depth == 0 else "delivering",
+                        queue_depth=depth, last_success_at=time.time(),
+                        last_success_transport=transport, last_success_event_id=event["id"],
+                        last_error="", next_retry_at=None,
+                    )
+                    clear_delivery_problem()
+                    log(event="delivered", event_id=event["id"], transport=transport,
+                        attempts=event["attempts"] + 1, queue_depth=depth)
+                    if depth:
+                        wake.settimeout(1.25)
+                        try:
+                            wake.recv(16)
+                        except socket.timeout:
+                            pass
+                    continue
+
+                attempts = event["attempts"] + 1
+                delay = RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)]
+                next_attempt_at = time.time() + delay
+                connection.execute(
+                    """
+                    UPDATE delivery_queue
+                    SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+                    WHERE id = ?
+                    """,
+                    (attempts, time.time(), next_attempt_at, error, event["id"]),
+                )
+                connection.commit()
+                depth = queue_depth(connection)
+                save_status(
+                    state="unavailable", queue_depth=depth, attempts=attempts,
+                    last_error=error, next_retry_at=next_attempt_at,
+                )
+                log(event="delivery-deferred", event_id=event["id"], attempts=attempts,
+                    retry_delay_seconds=delay, queue_depth=depth, error=error)
+                if attempts >= 3:
+                    notify_delivery_problem(depth, error)
+                wake.settimeout(delay)
+                try:
+                    wake.recv(16)
+                except socket.timeout:
+                    pass
+        finally:
+            connection.close()
+            wake.close()
+            WAKE_SOCKET.unlink(missing_ok=True)
+
+
+def format_time(timestamp):
+    if not timestamp:
+        return "never"
+    return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="seconds")
+
+
+def print_status():
+    with closing(connect_db()) as connection:
+        depth = queue_depth(connection)
+        oldest = connection.execute(
+            "SELECT created_at, attempts, next_attempt_at, last_error FROM delivery_queue "
+            "ORDER BY created_at, rowid LIMIT 1"
+        ).fetchone()
+    status = load_status()
+    active_alert = load_active_alert()
+    worker_rc, _, worker_output = run(
+        [SYSTEMCTL, "--user", "is-active", SERVICE], 3
+    )
+    paired_phone = phone()
+    print(f"State: {status.get('state', 'ready')}")
+    print(f"Queued alerts: {depth}")
+    print(f"Worker: {worker_output if worker_rc == 0 else 'inactive'}")
+    print(f"Direct app receiver: TLS port {PORT}")
+    print(f"Paired phone: {paired_phone.get('name', 'not configured')}")
+    print("Targets: " + (", ".join(paired_phone.get("targets", [])) or "none"))
+    print(f"Last successful delivery: {format_time(status.get('last_success_at'))}")
+    print(f"Last transport: {status.get('last_success_transport', 'none')}")
+    print(
+        "Phone completion alert: "
+        + ("waiting for desktop acknowledgement" if active_alert else "none")
+    )
+    if oldest:
+        print(f"Oldest queued: {format_time(oldest['created_at'])}")
+        print(f"Attempts: {oldest['attempts']}")
+        print(f"Next retry: {format_time(oldest['next_attempt_at'])}")
+        print(f"Last error: {oldest['last_error'] or 'none'}")
+    return 0
+
+
+def parse_enqueue(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--body", required=True)
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--event-id")
+    parser.add_argument("--environment-id", default="")
+    parser.add_argument("--thread-id", default="")
+    parser.add_argument("--ttl-hours", type=float, default=DEFAULT_TTL_SECONDS / 3600)
+    return parser.parse_args(argv)
+
+
+def main():
+    os.umask(0o077)
+    if len(sys.argv) == 2 and sys.argv[1] == "worker":
+        return worker()
+    if len(sys.argv) == 2 and sys.argv[1] == "status":
+        return print_status()
+    if len(sys.argv) == 2 and sys.argv[1] == "clear-active":
+        return clear_active_alert()
+    return enqueue(parse_enqueue(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

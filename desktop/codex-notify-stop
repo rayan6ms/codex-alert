@@ -1,0 +1,247 @@
+#!/usr/bin/python3
+
+import argparse
+import fcntl
+import hashlib
+import html
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from contextlib import closing
+from pathlib import Path
+
+from codex_alert_common import phone_configured, t3_enabled
+
+
+HOME = Path.home()
+DESKTOP = HOME / ".local/bin/codex-notify-stop-desktop"
+PHONE = HOME / ".local/bin/codex-phone-deliver"
+STATE_DIR = HOME / ".local/state/codex-notify"
+LOG_FILE = STATE_DIR / "hook-wrapper.log"
+LOG_LOCK_FILE = STATE_DIR / "hook-wrapper-log.lock"
+MAX_LOG_BYTES = 1024 * 1024
+T3_STATE_DIR = HOME / ".t3/userdata"
+T3_ENVIRONMENT_ID_FILE = T3_STATE_DIR / "environment-id"
+T3_STATE_DB = T3_STATE_DIR / "state.sqlite"
+
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+MARKDOWN_LINK = re.compile(r"!?\[([^]\n]*)\]\((?:\\.|[^)\n])*\)")
+MARKDOWN_REFERENCE_LINK = re.compile(r"!?\[([^]\n]*)\]\[[^]\n]*\]")
+MARKDOWN_AUTOLINK = re.compile(r"<((?:https?://|mailto:)[^>\n]+)>")
+HTML_TAG = re.compile(r"</?[A-Za-z][^>\n]*>")
+TABLE_DIVIDER = re.compile(r":?-{3,}:?")
+
+
+def clean_environment():
+    env = os.environ.copy()
+    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"):
+        env.pop(key, None)
+    return env
+
+
+def account_name(explicit):
+    codex_home = os.environ.get("CODEX_HOME", "").rstrip("/")
+    if codex_home:
+        name = Path(codex_home).name
+        if name.startswith(".codex"):
+            return name[1:]
+    return explicit or "codex"
+
+
+def compact(value, limit=1200):
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def markdown_to_plain_text(value):
+    """Render common Markdown constructs as compact notification-safe text."""
+    text = ANSI_ESCAPE.sub("", str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+    text = html.unescape(text)
+    text = MARKDOWN_LINK.sub(lambda match: match.group(1), text)
+    text = MARKDOWN_REFERENCE_LINK.sub(lambda match: match.group(1), text)
+    text = MARKDOWN_AUTOLINK.sub(lambda match: match.group(1).removeprefix("mailto:"), text)
+    text = HTML_TAG.sub("", text)
+
+    output = []
+    in_fence = False
+    for original_line in text.split("\n"):
+        line = original_line.rstrip()
+        if re.match(r"^\s{0,3}(`{3,}|~{3,})", line):
+            in_fence = not in_fence
+            continue
+
+        line = re.sub(r"^\s{0,3}#{1,6}(?:\s+|$)", "", line)
+        line = re.sub(r"^\s*(?:>\s*)+", "", line)
+        if re.fullmatch(r"\s*(?:[-*_]\s*){3,}", line):
+            continue
+
+        line = re.sub(r"^\s*[-+*]\s+(?:\[[ xX]\]\s+)?", "• ", line)
+        line = re.sub(r"^\s*\d+[.)]\s+(?:\[[ xX]\]\s+)?", "• ", line)
+        line = re.sub(r"^\s*\[[ xX]\]\s+", "• ", line)
+
+        if "|" in line:
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) > 1:
+                if all(TABLE_DIVIDER.fullmatch(cell.replace(" ", "")) for cell in cells):
+                    continue
+                line = " · ".join(cell for cell in cells if cell)
+
+        escaped = []
+        def preserve_escape(match):
+            escaped.append(match.group(1))
+            return f"\ue000{len(escaped) - 1}\ue001"
+
+        line = re.sub(r"\\([\\`*_{}\[\]()#+\-.!>|~])", preserve_escape, line)
+        line = re.sub(r"(`+)(.*?)\1", lambda match: match.group(2).strip(), line)
+        line = re.sub(r"(\*\*|__)(?=\S)(.*?\S)\1", r"\2", line)
+        line = re.sub(r"~~(?=\S)(.*?\S)~~", r"\1", line)
+        line = re.sub(r"(?<!\*)\*(?=\S)(.*?\S)\*(?!\*)", r"\1", line)
+        line = re.sub(r"(?<!\w)_(?=\S)(.*?\S)_(?!\w)", r"\1", line)
+        for index, character in enumerate(escaped):
+            line = line.replace(f"\ue000{index}\ue001", character)
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        output.append(line)
+
+    # Preserve paragraph/list separation without allowing notification bodies
+    # to grow large areas of empty space.
+    normalized = []
+    for line in output:
+        if line or (normalized and normalized[-1]):
+            normalized.append(line)
+    return "\n".join(normalized).strip()
+
+
+def completion_id(payload, account):
+    session_id = str(payload.get("session_id") or "").strip()
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if not session_id and not turn_id:
+        return None
+    identity = f"{account}\0{session_id}\0{turn_id}".encode("utf-8")
+    return "codex-" + hashlib.sha256(identity).hexdigest()[:32]
+
+
+def t3_thread_target(payload):
+    """Map Codex's provider thread id to T3's environment-scoped thread id."""
+    if not t3_enabled():
+        return None
+    provider_thread_id = str(payload.get("session_id") or "").strip()
+    if not provider_thread_id or not T3_ENVIRONMENT_ID_FILE.is_file() or not T3_STATE_DB.is_file():
+        return None
+    try:
+        environment_id = T3_ENVIRONMENT_ID_FILE.read_text(encoding="ascii").strip()
+        if not environment_id or len(environment_id) > 128:
+            return None
+        uri = T3_STATE_DB.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            rows = connection.execute(
+                """
+                SELECT runtime.thread_id, runtime.resume_cursor_json
+                FROM provider_session_runtime AS runtime
+                LEFT JOIN projection_threads AS thread
+                  ON thread.thread_id = runtime.thread_id
+                WHERE lower(runtime.provider_name) = 'codex'
+                ORDER BY thread.updated_at DESC
+                """
+            )
+            for thread_id, cursor_json in rows:
+                try:
+                    cursor = json.loads(cursor_json or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if cursor.get("threadId") == provider_thread_id:
+                    thread_id = str(thread_id or "").strip()
+                    if thread_id and len(thread_id) <= 128:
+                        return environment_id, thread_id
+    except (OSError, sqlite3.Error):
+        pass
+    return None
+
+
+def log(record):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with LOG_LOCK_FILE.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size >= MAX_LOG_BYTES:
+                previous = LOG_FILE.with_suffix(LOG_FILE.suffix + ".1")
+                previous.unlink(missing_ok=True)
+                LOG_FILE.replace(previous)
+            with LOG_FILE.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def launch(command):
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=clean_environment(),
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True
+    except Exception as exc:
+        log({"event": "launch-failed", "command": str(command[0]), "error": repr(exc)})
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--account", default="codex")
+    args = parser.parse_args()
+
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+
+    account = account_name(args.account)
+    cwd = str(payload.get("cwd") or os.getcwd())
+    project = Path(cwd).name or cwd or "Codex"
+    model = compact(payload.get("model"), 100)
+    message = compact(markdown_to_plain_text(
+        payload.get("last_assistant_message") or "Task completed."
+    ))
+    title = f"Codex finished · {project}"
+    details = account + (f" · {model}" if model else "")
+    body = details + (f"\n{message}" if message else "")
+    event_id = completion_id(payload, account)
+    t3_target = t3_thread_target(payload)
+
+    common = ["--title", title, "--body", body, "--account", account, "--project", project]
+    identity = ["--event-id", event_id] if event_id else []
+    desktop_ok = launch([str(DESKTOP), *common, *identity])
+    t3_identity = []
+    if t3_target:
+        t3_identity = ["--environment-id", t3_target[0], "--thread-id", t3_target[1]]
+    phone_ok = phone_configured() and launch(
+        [str(PHONE), *common, *identity, *t3_identity]
+    )
+
+    log({
+        "event": "completion-dispatched",
+        "account": account,
+        "project": project,
+        "model": model,
+        "session_id": payload.get("session_id"),
+        "turn_id": payload.get("turn_id"),
+        "event_id": event_id,
+        "t3_environment_id": t3_target[0] if t3_target else None,
+        "t3_thread_id": t3_target[1] if t3_target else None,
+        "desktop_launched": desktop_ok,
+        "phone_launched": phone_ok,
+    })
+
+    print("{}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

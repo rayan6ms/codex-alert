@@ -1,0 +1,18 @@
+[Unit]
+Description=Deliver queued Codex Alert notifications to Android
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/codex-phone-deliver worker
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+MemoryMax=96M
+TasksMax=24
+
+[Install]
+WantedBy=default.target

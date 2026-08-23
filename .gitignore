@@ -1,0 +1,13 @@
+.gradle/
+.idea/
+.venv/
+dist/
+local.properties
+app/src/main/res/raw/codex_alert_server.p12
+**/build/
+*.iml
+*.jks
+*.keystore
+.DS_Store
+__pycache__/
+*.py[cod]

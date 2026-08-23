@@ -1,0 +1,12 @@
+[Unit]
+Description=Detect newly added Codex profiles for Codex Alert
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=codex-alert-hooks.service
+
+[Install]
+WantedBy=timers.target
