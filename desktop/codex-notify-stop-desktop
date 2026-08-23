@@ -20,10 +20,12 @@ LOG_LOCK_FILE = STATE_DIR / "desktop-delivery-log.lock"
 MAX_LOG_BYTES = 1024 * 1024
 RECENT_EVENTS_FILE = STATE_DIR / "desktop-recent-events"
 EVENT_LOCK_FILE = STATE_DIR / "desktop-events.lock"
-APP_ICON = HOME / ".local/share/icons/hicolor/scalable/apps/dev.rayan.codexalert.svg"
-SOUND = Path("/usr/share/sounds/freedesktop/stereo/complete.oga")
-NOTIFY_SEND = shutil.which("notify-send") or "/usr/bin/notify-send"
-PW_PLAY = shutil.which("pw-play")
+DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+APP_ICON = DATA_HOME / "icons/hicolor/scalable/apps/dev.rayan.codexalert.svg"
+SOUND_CANDIDATES = (
+    Path("/usr/share/sounds/freedesktop/stereo/complete.oga"),
+    Path("/usr/share/sounds/freedesktop/stereo/message.oga"),
+)
 
 
 def clean_environment():
@@ -50,6 +52,9 @@ def log(**record):
 
 
 def notify(title, body):
+    notify_send = shutil.which("notify-send")
+    if not notify_send:
+        return 1, "notify-send is not installed", ""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -59,11 +64,10 @@ def notify(title, body):
             replace_id = 0
 
         command = [
-            NOTIFY_SEND,
+            notify_send,
             "--print-id",
             f"--replace-id={replace_id}",
             "--app-name=Codex Alert",
-            f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
             "--urgency=normal",
             html.escape(title, quote=False),
@@ -77,6 +81,24 @@ def notify(title, body):
             capture_output=True,
             text=True,
         )
+        if result.returncode != 0:
+            # Older notify-send versions lack replacement IDs but still
+            # implement the core freedesktop.org notification protocol.
+            result = subprocess.run(
+                [
+                    notify_send,
+                    "--app-name=Codex Alert",
+                    f"--icon={APP_ICON}",
+                    "--urgency=normal",
+                    html.escape(title, quote=False),
+                    html.escape(body, quote=False),
+                ],
+                env=clean_environment(),
+                check=False,
+                timeout=3,
+                capture_output=True,
+                text=True,
+            )
         new_id = result.stdout.strip()
         if result.returncode == 0 and new_id.isdigit():
             ID_FILE.write_text(new_id + "\n", encoding="ascii")
@@ -84,12 +106,22 @@ def notify(title, body):
 
 
 def play_sound():
-    if not PW_PLAY:
-        return None, "pw-play not installed"
-    if not SOUND.exists():
+    sound = next((path for path in SOUND_CANDIDATES if path.is_file()), None)
+    if not sound:
         return None, "sound file missing"
+    players = (
+        ("pw-play", lambda binary: [binary, str(sound)]),
+        ("paplay", lambda binary: [binary, str(sound)]),
+        ("canberra-gtk-play", lambda binary: [binary, "--file", str(sound)]),
+    )
+    command = next(
+        (builder(binary) for name, builder in players if (binary := shutil.which(name))),
+        None,
+    )
+    if not command:
+        return None, "no supported sound player installed"
     result = subprocess.run(
-        [PW_PLAY, str(SOUND)],
+        command,
         env=clean_environment(),
         check=False,
         timeout=3,

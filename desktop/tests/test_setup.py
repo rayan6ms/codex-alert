@@ -137,6 +137,19 @@ class HookSetupTests(unittest.TestCase):
             sync.assert_called_once_with(main_hooks)
             self.assertTrue((shadow_home / "hooks.json").is_symlink())
 
+    def test_cross_desktop_watcher_syncs_immediately(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = Path(temporary) / "watch.lock"
+            with (
+                patch.object(MODULE, "WATCH_LOCK", lock),
+                patch.object(MODULE, "sync_hooks", return_value=0) as sync,
+                patch.object(MODULE.time, "sleep", side_effect=KeyboardInterrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                MODULE.watch_hooks()
+
+            sync.assert_called_once_with(quiet=True)
+
 
 if __name__ == "__main__":
     unittest.main()

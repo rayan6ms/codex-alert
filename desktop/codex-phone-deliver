@@ -7,6 +7,7 @@ import fcntl
 import http.client
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import ssl
@@ -28,7 +29,9 @@ from codex_alert_common import (
 
 
 HOME = Path.home()
-SYSTEMCTL = "/usr/bin/systemctl"
+SYSTEMCTL = shutil.which("systemctl")
+NOTIFY_SEND = shutil.which("notify-send")
+GDBUS = shutil.which("gdbus")
 PORT = 24601
 DB_FILE = STATE_DIR / "phone-queue.sqlite3"
 LOCK_FILE = STATE_DIR / "phone-worker.lock"
@@ -184,11 +187,11 @@ def load_token():
 
 
 def discover_lan_targets():
-    binary = Path("/usr/bin/avahi-browse")
-    if not binary.exists():
+    binary = shutil.which("avahi-browse")
+    if not binary:
         return []
     returncode, _, output = run(
-        [str(binary), "--resolve", "--terminate", "--parsable", "_codexalert._tcp"], 2
+        [binary, "--resolve", "--terminate", "--parsable", "_codexalert._tcp"], 2
     )
     if returncode != 0:
         return []
@@ -341,19 +344,31 @@ def deliver(event):
 
 
 def notify_delivery_problem(depth, error):
+    if not NOTIFY_SEND:
+        return
     try:
         previous = int(STATUS_NOTIFICATION_ID_FILE.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         previous = 0
     result = subprocess.run(
         [
-            "/usr/bin/notify-send", "--print-id", f"--replace-id={previous}",
+            NOTIFY_SEND, "--print-id", f"--replace-id={previous}",
             "--app-name=Codex Alert", "--urgency=low",
             "Phone alerts are waiting",
             f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
         ],
         env=clean_environment(), check=False, timeout=3, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        result = subprocess.run(
+            [
+                NOTIFY_SEND, "--app-name=Codex Alert", "--urgency=low",
+                "Phone alerts are waiting",
+                f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
+            ],
+            env=clean_environment(), check=False, timeout=3,
+            capture_output=True, text=True,
+        )
     notification_id = result.stdout.strip()
     if result.returncode == 0 and notification_id.isdigit():
         STATUS_NOTIFICATION_ID_FILE.write_text(notification_id + "\n", encoding="ascii")
@@ -364,17 +379,18 @@ def clear_delivery_problem():
         notification_id = int(STATUS_NOTIFICATION_ID_FILE.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         return
-    subprocess.run(
-        [
-            "/usr/bin/gdbus", "call", "--session",
-            "--dest", "org.freedesktop.Notifications",
-            "--object-path", "/org/freedesktop/Notifications",
-            "--method", "org.freedesktop.Notifications.CloseNotification",
-            str(notification_id),
-        ],
-        env=clean_environment(), check=False, timeout=3,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    if GDBUS:
+        subprocess.run(
+            [
+                GDBUS, "call", "--session",
+                "--dest", "org.freedesktop.Notifications",
+                "--object-path", "/org/freedesktop/Notifications",
+                "--method", "org.freedesktop.Notifications.CloseNotification",
+                str(notification_id),
+            ],
+            env=clean_environment(), check=False, timeout=3,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     STATUS_NOTIFICATION_ID_FILE.unlink(missing_ok=True)
 
 
@@ -389,13 +405,19 @@ def activate_worker():
     except OSError:
         pass
 
-    start = subprocess.run(
-        [SYSTEMCTL, "--user", "start", "--no-block", SERVICE],
-        env=clean_environment(), check=False, timeout=3,
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-    )
-    if start.returncode == 0:
-        return True
+    start_error = "systemd user service is unavailable"
+    if SYSTEMCTL:
+        try:
+            start = subprocess.run(
+                [SYSTEMCTL, "--user", "start", "--no-block", SERVICE],
+                env=clean_environment(), check=False, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            )
+            if start.returncode == 0:
+                return True
+            start_error = start.stderr
+        except OSError as exc:
+            start_error = repr(exc)
 
     try:
         subprocess.Popen(
@@ -404,7 +426,7 @@ def activate_worker():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True,
         )
-        log(event="systemd-start-fallback", error=compact(start.stderr, 500))
+        log(event="background-worker-fallback", error=compact(start_error, 500))
         return True
     except Exception as exc:
         log(event="worker-start-failed", error=repr(exc))
@@ -578,13 +600,19 @@ def print_status():
             "ORDER BY created_at, rowid LIMIT 1"
         ).fetchone()
     status = load_status()
-    worker_rc, _, worker_output = run(
-        [SYSTEMCTL, "--user", "is-active", SERVICE], 3
-    )
+    worker_output = "inactive"
+    if SYSTEMCTL:
+        worker_rc, _, systemd_output = run(
+            [SYSTEMCTL, "--user", "is-active", SERVICE], 3
+        )
+        if worker_rc == 0:
+            worker_output = systemd_output
+    if worker_output == "inactive" and WAKE_SOCKET.exists():
+        worker_output = "active"
     paired_phone = phone()
     print(f"State: {status.get('state', 'ready')}")
     print(f"Queued alerts: {depth}")
-    print(f"Worker: {worker_output if worker_rc == 0 else 'inactive'}")
+    print(f"Worker: {worker_output}")
     print(f"Direct app receiver: TLS port {PORT}")
     print(f"Paired phone: {paired_phone.get('name', 'not configured')}")
     print("Targets: " + (", ".join(paired_phone.get("targets", [])) or "none"))

@@ -5,16 +5,24 @@ repository="${CODEX_ALERT_REPOSITORY:-rayan6ms/codex-alert}"
 release_base="https://github.com/${repository}/releases/latest/download"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    printf 'Codex Alert desktop currently supports Linux.\n' >&2
+    printf 'Codex Alert desktop currently supports Linux and its standard notification service.\n' >&2
     exit 1
 fi
 
 missing=()
-for command in curl tar sha256sum awk mktemp find grep; do
+for command in curl tar awk mktemp find grep; do
     command -v "${command}" >/dev/null 2>&1 || missing+=("${command}")
 done
 if (( ${#missing[@]} )); then
     printf 'Missing required command(s): %s\n' "${missing[*]}" >&2
+    exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    checksum() { sha256sum "$1" | awk '{ print $1 }'; }
+elif command -v shasum >/dev/null 2>&1; then
+    checksum() { shasum -a 256 "$1" | awk '{ print $1 }'; }
+else
+    printf 'Missing required command: sha256sum or shasum.\n' >&2
     exit 1
 fi
 
@@ -32,7 +40,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
     "${release_base}/SHA256SUMS" -o "${checksums}"
 
 expected="$(awk '$2 == "codex-alert-desktop.tar.gz" { print $1 }' "${checksums}")"
-actual="$(sha256sum "${archive}" | awk '{ print $1 }')"
+actual="$(checksum "${archive}")"
 if [[ -z "${expected}" || "${actual}" != "${expected}" ]]; then
     printf 'Downloaded package failed checksum verification. Nothing was installed.\n' >&2
     exit 1

@@ -1,8 +1,8 @@
 # Codex Alert
 
-Receive a clean GNOME and Android notification when Codex finishes. It works
-with every authenticated local Codex account and sends directly over your LAN;
-there is no cloud relay.
+Receive a clean Linux desktop and Android notification when Codex finishes. It
+works with every authenticated local Codex account and sends directly over your
+LAN; there is no cloud relay.
 
 ## 1. Install on the computer
 
@@ -18,8 +18,13 @@ and removes the temporary files. It never uses `sudo`.
 
 Codex Alert detects accounts by Codex's `auth.json` marker, preserves unrelated
 hooks, preserves T3 Code's shared shadow-home symlinks, and automatically
-notices newly added accounts. GNOME's native notification service is used, so
-no Shell extension is needed.
+notices newly added accounts.
+
+Desktop alerts use the standard [freedesktop.org notification service](https://specifications.freedesktop.org/notification/latest/),
+so the same installer works on GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt,
+Budgie, and other compatible X11 or Wayland desktops. No desktop extension is
+needed. A systemd user timer is used when available; other Linux systems use
+the standard [XDG autostart mechanism](https://specifications.freedesktop.org/autostart/latest/) instead.
 
 Check the result with:
 

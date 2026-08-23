@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Codex Alert account detection
+Comment=Detect authenticated Codex accounts for completion notifications
+Exec="@CODEX_ALERT_BIN@" watch
+TryExec="@CODEX_ALERT_BIN@"
+Terminal=false
+NoDisplay=true

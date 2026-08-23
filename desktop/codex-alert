@@ -3,12 +3,14 @@
 """Set up, pair, test, and inspect Codex Alert."""
 
 import argparse
+import fcntl
 import hashlib
 import http.client
 import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import ssl
 import subprocess
@@ -36,6 +38,8 @@ HOOK_COMMAND = str(Path.home() / ".local/bin/codex-notify-stop")
 PHONE_DELIVER = Path.home() / ".local/bin/codex-phone-deliver"
 DESKTOP_NOTIFY = Path.home() / ".local/bin/codex-notify-stop-desktop"
 PAIR_CODE = re.compile(r"[0-9]{8}")
+WATCH_LOCK = Path.home() / ".local/state/codex-notify/account-watch.lock"
+WATCH_INTERVAL_SECONDS = 5 * 60
 
 
 def run(command, timeout=10):
@@ -175,11 +179,24 @@ def sync_hooks(quiet=False):
     return 1 if failures else 0
 
 
+def watch_hooks():
+    """Keep account discovery available on desktops without a systemd user manager."""
+    WATCH_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with WATCH_LOCK.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        while True:
+            sync_hooks(quiet=True)
+            time.sleep(WATCH_INTERVAL_SECONDS)
+
+
 def discover_phones():
-    binary = Path("/usr/bin/avahi-browse")
-    if not binary.exists():
+    binary = shutil.which("avahi-browse")
+    if not binary:
         return []
-    result = run([str(binary), "--resolve", "--terminate", "--parsable", "_codexalert._tcp"], 5)
+    result = run([binary, "--resolve", "--terminate", "--parsable", "_codexalert._tcp"], 5)
     if result.returncode != 0:
         return []
     found = []
@@ -364,6 +381,10 @@ def status():
     homes = codex_homes()
     configured = sum(hook_file_configured(home / "hooks.json") for home in homes)
     print(f"Desktop hooks: {configured}/{len(homes)} authenticated Codex accounts")
+    print(
+        "Desktop notifications: "
+        + ("freedesktop.org service" if shutil.which("notify-send") else "unavailable (notify-send missing)")
+    )
     print(f"Phone: {phone().get('name', 'not paired') if phone_configured() else 'not paired'}")
     print(f"T3 Code integration: {'on' if settings().get('t3_integration') is True else 'off'}")
     if PHONE_DELIVER.exists() and phone_configured():
@@ -383,6 +404,7 @@ def main():
     pair_parser.add_argument("--code", help="8-digit code shown by the Android app")
     subparsers.add_parser("status", help="show configuration and delivery status")
     subparsers.add_parser("test", help="send test notifications")
+    subparsers.add_parser("watch", help=argparse.SUPPRESS)
     t3_parser = subparsers.add_parser("t3", help="enable or disable optional T3 Code routing")
     t3_parser.add_argument("state", choices=("on", "off"))
     args = parser.parse_args()
@@ -396,6 +418,8 @@ def main():
             return status()
         if args.command == "test":
             return test_all()
+        if args.command == "watch":
+            return watch_hooks()
         if args.command == "t3":
             set_t3_enabled(args.state == "on")
             print(f"T3 Code integration is now {args.state}.")

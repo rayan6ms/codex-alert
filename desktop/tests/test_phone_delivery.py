@@ -104,5 +104,15 @@ class PhoneDeliveryTests(unittest.TestCase):
         with closing(MODULE.connect_db()) as connection:
             self.assertEqual(MODULE.queue_depth(connection), 0)
 
+    def test_worker_process_fallback_does_not_require_systemd(self):
+        with (
+            patch.object(MODULE, "SYSTEMCTL", None),
+            patch.object(MODULE.socket, "socket", side_effect=OSError("not running")),
+            patch.object(MODULE.subprocess, "Popen") as popen,
+        ):
+            self.assertTrue(MODULE.activate_worker())
+
+        self.assertEqual(popen.call_args.args[0][-1], "worker")
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,18 @@ jobs:
           test -n "${KEYSTORE_BASE64}"
           printf '%s' "${KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/codex-alert-release.jks"
 
+      - name: Test desktop companion
+        run: |
+          python3 -W error::ResourceWarning -m unittest discover -s desktop/tests -v
+          python3 -m py_compile \
+            desktop/codex-alert \
+            desktop/codex-notify-stop \
+            desktop/codex-notify-stop-desktop \
+            desktop/codex-phone-deliver \
+            desktop/codex_alert_common.py
+          bash -n install.sh install-latest.sh desktop/install.sh scripts/package-desktop.sh
+          shellcheck install.sh install-latest.sh desktop/install.sh scripts/package-desktop.sh
+
       - name: Test and build signed APK
         env:
           ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/codex-alert-release.jks
