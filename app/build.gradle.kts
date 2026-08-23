@@ -7,6 +7,10 @@ val releaseStorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSW
 val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
 val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
 val appVersion = rootProject.file("VERSION").readText().trim()
+val appVersionParts = appVersion.split('.').map(String::toInt)
+require(appVersionParts.size == 3 && appVersionParts.all { it in 0..99 }) {
+    "VERSION must use three numeric components between 0 and 99"
+}
 
 android {
     namespace = "dev.rayan.codexalert"
@@ -16,7 +20,7 @@ android {
         applicationId = "dev.rayan.codexalert"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10000
+        versionCode = appVersionParts[0] * 10_000 + appVersionParts[1] * 100 + appVersionParts[2]
         versionName = appVersion
     }
 

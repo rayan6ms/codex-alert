@@ -248,10 +248,10 @@ def pair(args):
             fingerprint[index:index + 4] for index in range(0, 16, 4)
         ).upper()
         print(f"Security code: {readable}")
-        if args.yes:
-            return True
-        confirmed = input("Does this match the security code on the phone? [Y/n] ").strip().lower()
-        return confirmed in ("", "y", "yes")
+        confirmed = input(
+            "Compare it with the phone, then type yes to continue: "
+        ).strip().lower()
+        return confirmed == "yes"
 
     result, certificate = pair_request(host, code, confirm_certificate)
     save_pairing(host, result, certificate)
@@ -279,7 +279,7 @@ def test_phone():
     if result.returncode != 0:
         print(result.stderr.strip() or "Could not queue the test alert.", file=sys.stderr)
     else:
-        print("Sent a test notification to the phone.")
+        print("Queued a test notification for the phone; delivery retries automatically.")
     return result.returncode
 
 
@@ -325,7 +325,6 @@ def main():
     pair_parser = subparsers.add_parser("pair", help="pair an Android phone")
     pair_parser.add_argument("--host", help="phone IP or .local name")
     pair_parser.add_argument("--code", help="8-digit code shown by the Android app")
-    pair_parser.add_argument("--yes", action="store_true", help="skip fingerprint confirmation")
     subparsers.add_parser("status", help="show configuration and delivery status")
     subparsers.add_parser("test", help="send test notifications")
     t3_parser = subparsers.add_parser("t3", help="enable or disable optional T3 Code routing")
