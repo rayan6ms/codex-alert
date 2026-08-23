@@ -4,7 +4,6 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -37,6 +36,7 @@ public final class MainActivity extends Activity {
     };
     private TextView setupStatus;
     private TextView receiverStatus;
+    private Button notificationPermissionButton;
     private Button pairingButton;
     private Button forgetButton;
     private Switch t3Switch;
@@ -92,7 +92,11 @@ public final class MainActivity extends Activity {
                 14,
                 Color.rgb(75, 85, 99)
         ));
-        addWithTopMargin(content, button("Allow notifications", view -> requestNotificationPermission()));
+        notificationPermissionButton = button(
+                "Allow notifications",
+                view -> requestNotificationPermission()
+        );
+        addWithTopMargin(content, notificationPermissionButton);
 
         content.addView(sectionTitle("2 · Pair this phone"));
         content.addView(text(
@@ -176,7 +180,7 @@ public final class MainActivity extends Activity {
             String code = DeviceIdentity.beginPairing(this);
             setupStatus.setText(
                     "Pairing code\n" + code.substring(0, 4) + " " + code.substring(4)
-                            + "\n\nSecurity code\n" + DeviceIdentity.securityCode()
+                            + "\n\nSecurity code\n" + DeviceIdentity.securityCode(this)
                             + "\n\nExpires in 10 minutes."
             );
             AlertServerService.start(this);
@@ -217,15 +221,19 @@ public final class MainActivity extends Activity {
         pairingButton.setVisibility(paired ? View.GONE : View.VISIBLE);
         forgetButton.setVisibility(paired ? View.VISIBLE : View.GONE);
         if (paired) {
-            setupStatus.setText("Paired securely\nSecurity code · " + DeviceIdentity.securityCode());
+            setupStatus.setText("Paired securely\nSecurity code · " + DeviceIdentity.securityCode(this));
         } else if (!DeviceIdentity.pairingActive(this)) {
             setupStatus.setText("Not paired yet\n" + AlertServerService.networkSummary());
         }
 
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        var channel = manager.getNotificationChannel(AlertNotifier.COMPLETION_CHANNEL_ID);
-        boolean notifications = manager.areNotificationsEnabled()
-                && (channel == null || channel.getImportance() != NotificationManager.IMPORTANCE_NONE);
+        boolean notifications = AlertNotifier.completionNotificationsEnabled(this);
+        notificationPermissionButton.setVisibility(notifications ? View.GONE : View.VISIBLE);
+        boolean runtimePermissionMissing = Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED;
+        notificationPermissionButton.setText(
+                runtimePermissionMissing ? "Allow notifications" : "Open notification settings"
+        );
         var prefs = getSharedPreferences("status", Context.MODE_PRIVATE);
         String activeEventId = prefs.getString("active_event_id", "");
         StringBuilder value = new StringBuilder()

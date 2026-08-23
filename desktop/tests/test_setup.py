@@ -16,6 +16,37 @@ MODULE = importlib.machinery.SourceFileLoader("codex_alert_cli", str(SCRIPT)).lo
 
 
 class HookSetupTests(unittest.TestCase):
+    def test_decodes_avahi_service_name_escapes_as_utf8(self):
+        self.assertEqual(
+            MODULE.decode_avahi_field(
+                r"Codex\032Alert\032\194\183\032Xiaomi\032M2101K6G"
+            ),
+            "Codex Alert · Xiaomi M2101K6G",
+        )
+
+    def test_decodes_avahi_delimiter_and_backslash_escapes(self):
+        self.assertEqual(
+            MODULE.decode_avahi_field(r"Phone\059Lab\092One"),
+            r"Phone;Lab\One",
+        )
+
+    def test_discovery_decodes_the_phone_name(self):
+        result = type("Result", (), {
+            "returncode": 0,
+            "stdout": (
+                "=;enp8s0;IPv4;Codex\\032Alert\\032\\194\\183\\032Phone;"
+                "_codexalert._tcp;local;phone.local;192.168.0.2;24601;paired=0\n"
+            ),
+        })()
+        with (
+            patch.object(MODULE.shutil, "which", return_value="/usr/bin/avahi-browse"),
+            patch.object(MODULE, "run", return_value=result),
+        ):
+            self.assertEqual(
+                MODULE.discover_phones(),
+                [("Codex Alert · Phone", "192.168.0.2")],
+            )
+
     def test_discovery_uses_auth_marker_not_directory_name(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

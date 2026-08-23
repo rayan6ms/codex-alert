@@ -9,6 +9,7 @@ import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -39,6 +40,7 @@ import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLSocket;
 
 public final class AlertServerService extends Service {
+    private static final String LOG_TAG = "CodexAlertReceiver";
     static final int PORT = 24601;
     static final String ACTION_TEST = "dev.rayan.codexalert.TEST";
     private static final int MAX_HEADER_BYTES = 8192;
@@ -151,7 +153,7 @@ public final class AlertServerService extends Service {
 
     private SSLServerSocket createServerSocket() throws Exception {
         SSLContext context = SSLContext.getInstance("TLS");
-        context.init(DeviceIdentity.keyManagers().getKeyManagers(), null, null);
+        context.init(DeviceIdentity.keyManagers(this).getKeyManagers(), null, null);
         SSLServerSocketFactory factory = context.getServerSocketFactory();
         SSLServerSocket socket = (SSLServerSocket) factory.createServerSocket();
         socket.setReuseAddress(true);
@@ -220,8 +222,9 @@ public final class AlertServerService extends Service {
             sendResponse(output, "notifications-disabled".equals(result) ? 503 : 200, result);
         } catch (JSONException exception) {
             // The connection is already closed; malformed JSON is not retried server-side.
-        } catch (Exception ignored) {
+        } catch (Exception exception) {
             // A single invalid or interrupted client must never stop the listener.
+            Log.w(LOG_TAG, "Rejected receiver connection · " + cleanError(exception));
         }
     }
 

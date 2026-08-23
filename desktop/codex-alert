@@ -205,11 +205,28 @@ def discover_phones():
         fields = line.split(";")
         if len(fields) < 9 or fields[0] != "=" or fields[2] != "IPv4":
             continue
-        name, host, port = fields[3].strip(), fields[7].strip(), fields[8].strip()
+        name = decode_avahi_field(fields[3].strip())
+        host, port = fields[7].strip(), fields[8].strip()
         if host and port == str(PORT) and host not in seen:
             seen.add(host)
             found.append((name or "Android phone", host))
     return found
+
+
+def decode_avahi_field(value):
+    """Decode Avahi's decimal byte escapes and then interpret the result as UTF-8."""
+    decoded = bytearray()
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and value[index + 1:index + 4].isdigit():
+            escaped = int(value[index + 1:index + 4])
+            if escaped <= 255:
+                decoded.append(escaped)
+                index += 4
+                continue
+        decoded.extend(value[index].encode("utf-8"))
+        index += 1
+    return decoded.decode("utf-8", errors="replace")
 
 
 def choose_phone(explicit_host=None):

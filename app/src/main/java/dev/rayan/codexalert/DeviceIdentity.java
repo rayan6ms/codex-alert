@@ -11,6 +11,7 @@ import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
+import java.security.spec.ECGenParameterSpec;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -21,19 +22,20 @@ import javax.security.auth.x500.X500Principal;
 
 final class DeviceIdentity {
     private static final String PREFERENCES = "identity";
-    private static final String KEY_ALIAS = "codex-alert-server-v1";
+    private static final int IDENTITY_VERSION = 3;
+    private static final String KEY_ALIAS = "codex-alert-server-v3";
     private static final long PAIRING_LIFETIME_MS = 10L * 60 * 1000;
     private static final int MAX_PAIRING_ATTEMPTS = 5;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private DeviceIdentity() {}
 
-    static synchronized KeyStore keyStore() throws Exception {
+    static synchronized KeyStore keyStore(Context context) throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
         keyStore.load(null);
         if (!keyStore.containsAlias(KEY_ALIAS)) {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_RSA,
+                    KeyProperties.KEY_ALGORITHM_EC,
                     "AndroidKeyStore"
             );
             long now = System.currentTimeMillis();
@@ -41,9 +43,15 @@ final class DeviceIdentity {
             RANDOM.nextBytes(serial);
             generator.initialize(
                     new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_SIGN)
-                            .setKeySize(2048)
-                            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
-                            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                            .setAlgorithmParameterSpec(new ECGenParameterSpec("secp256r1"))
+                            // Android's TLS stack may hash handshake data itself and request a
+                            // raw signature, so TLS identities must also allow DIGEST_NONE.
+                            .setDigests(
+                                    KeyProperties.DIGEST_NONE,
+                                    KeyProperties.DIGEST_SHA256,
+                                    KeyProperties.DIGEST_SHA384,
+                                    KeyProperties.DIGEST_SHA512
+                            )
                             .setCertificateSubject(new X500Principal("CN=Codex Alert receiver"))
                             .setCertificateSerialNumber(new BigInteger(1, serial))
                             .setCertificateNotBefore(new Date(now - 24L * 60 * 60 * 1000))
@@ -53,32 +61,32 @@ final class DeviceIdentity {
             generator.generateKeyPair();
             keyStore.load(null);
         }
+        migrateLegacyIdentity(context);
         return keyStore;
     }
 
-    static KeyManagerFactory keyManagers() throws Exception {
+    static KeyManagerFactory keyManagers(Context context) throws Exception {
         KeyManagerFactory factory = KeyManagerFactory.getInstance(
                 KeyManagerFactory.getDefaultAlgorithm()
         );
-        factory.init(keyStore(), null);
+        factory.init(keyStore(context), null);
         return factory;
     }
 
     static synchronized String deliveryToken(Context context) {
+        ensureIdentity(context);
         var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         String existing = preferences.getString("delivery_token", "");
         if (existing.matches("[0-9a-f]{64}")) {
             return existing;
         }
-        byte[] random = new byte[32];
-        RANDOM.nextBytes(random);
-        String token = hex(random);
+        String token = newDeliveryToken();
         preferences.edit().putString("delivery_token", token).apply();
         return token;
     }
 
     static synchronized String beginPairing(Context context) throws Exception {
-        keyStore();
+        keyStore(context);
         deliveryToken(context);
         String code = String.format(Locale.ROOT, "%08d", RANDOM.nextInt(100_000_000));
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -125,8 +133,9 @@ final class DeviceIdentity {
     }
 
     static boolean isPaired(Context context) {
-        return context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-                .getBoolean("paired", false);
+        var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+        return preferences.getInt("identity_version", 0) == IDENTITY_VERSION
+                && preferences.getBoolean("paired", false);
     }
 
     static synchronized void forgetDesktop(Context context) {
@@ -142,9 +151,9 @@ final class DeviceIdentity {
                 .apply();
     }
 
-    static String securityCode() {
+    static String securityCode(Context context) {
         try {
-            Certificate certificate = keyStore().getCertificate(KEY_ALIAS);
+            Certificate certificate = keyStore(context).getCertificate(KEY_ALIAS);
             String digest = hex(MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded()));
             List<String> groups = new ArrayList<>();
             for (int index = 0; index < 16; index += 4) {
@@ -172,6 +181,38 @@ final class DeviceIdentity {
                 .remove("pairing_expires_at")
                 .remove("pairing_attempts")
                 .apply();
+    }
+
+    private static void migrateLegacyIdentity(Context context) {
+        var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+        if (preferences.getInt("identity_version", 0) == IDENTITY_VERSION) {
+            return;
+        }
+        boolean saved = preferences.edit()
+                .putInt("identity_version", IDENTITY_VERSION)
+                .putBoolean("paired", false)
+                .putString("delivery_token", newDeliveryToken())
+                .remove("pairing_code")
+                .remove("pairing_expires_at")
+                .remove("pairing_attempts")
+                .commit();
+        if (!saved) {
+            throw new IllegalStateException("Could not migrate the device identity");
+        }
+    }
+
+    private static void ensureIdentity(Context context) {
+        try {
+            keyStore(context);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Could not prepare the device identity", exception);
+        }
+    }
+
+    private static String newDeliveryToken() {
+        byte[] random = new byte[32];
+        RANDOM.nextBytes(random);
+        return hex(random);
     }
 
     private static String hex(byte[] bytes) {
