@@ -20,6 +20,7 @@ from pathlib import Path
 from codex_alert_common import (
     CERTIFICATE_FILE,
     CONFIG_DIR,
+    HOME,
     PHONE_FILE,
     TOKEN_FILE,
     atomic_json,
@@ -104,16 +105,86 @@ def sync_hook_file(path):
     temporary.replace(path)
 
 
+def remove_managed_hook(path):
+    try:
+        source = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(f"cannot safely clean invalid JSON in {path}: {exc}") from exc
+    if "codex-notify-stop" not in source and "codex-alert hook" not in source:
+        return False
+    try:
+        value = json.loads(source)
+    except ValueError as exc:
+        raise RuntimeError(f"cannot safely clean invalid JSON in {path}: {exc}") from exc
+    try:
+        stop = value["hooks"]["Stop"]
+    except (KeyError, TypeError):
+        return False
+    if not isinstance(stop, list):
+        raise RuntimeError(f"cannot safely clean invalid Stop hooks in {path}")
+
+    changed = False
+    retained_groups = []
+    for group in stop:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            retained_groups.append(group)
+            continue
+        retained = [hook for hook in group["hooks"] if not is_codex_alert_hook(hook)]
+        changed |= len(retained) != len(group["hooks"])
+        if retained:
+            group["hooks"] = retained
+            retained_groups.append(group)
+    if not changed:
+        return False
+    value["hooks"]["Stop"] = retained_groups
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+    return True
+
+
+def hook_file_configured(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return any(
+            is_codex_alert_hook(hook)
+            for group in value.get("hooks", {}).get("Stop", [])
+            if isinstance(group, dict)
+            for hook in group.get("hooks", [])
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def sync_hooks(quiet=False):
     homes = codex_homes()
+    active = {home.resolve() for home in homes}
     failures = []
     for home in homes:
         try:
             sync_hook_file(home / "hooks.json")
         except RuntimeError as exc:
             failures.append(str(exc))
+    cleaned = 0
+    try:
+        candidates = list(HOME.iterdir())
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        hook_path = candidate / "hooks.json"
+        try:
+            identity = candidate.resolve()
+            if candidate.is_dir() and identity not in active and remove_managed_hook(hook_path):
+                cleaned += 1
+        except RuntimeError as exc:
+            failures.append(str(exc))
     if not quiet:
-        print(f"Configured {len(homes) - len(failures)} Codex profile(s).")
+        print(f"Configured {sum(hook_file_configured(home / 'hooks.json') for home in homes)} authenticated Codex account(s).")
+        if cleaned:
+            print(f"Removed stale Codex Alert hooks from {cleaned} unauthenticated home(s).")
     for failure in failures:
         print(f"Warning: {failure}", file=sys.stderr)
     return 1 if failures else 0
@@ -306,8 +377,8 @@ def test_all():
 
 def status():
     homes = codex_homes()
-    configured = sum((home / "hooks.json").is_file() for home in homes)
-    print(f"Desktop hooks: {configured}/{len(homes)} Codex profiles")
+    configured = sum(hook_file_configured(home / "hooks.json") for home in homes)
+    print(f"Desktop hooks: {configured}/{len(homes)} authenticated Codex accounts")
     print(f"Phone: {phone().get('name', 'not paired') if phone_configured() else 'not paired'}")
     print(f"T3 Code integration: {'on' if settings().get('t3_integration') is True else 'off'}")
     if PHONE_DELIVER.exists() and phone_configured():

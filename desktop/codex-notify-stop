@@ -46,8 +46,8 @@ def account_name(explicit):
     codex_home = os.environ.get("CODEX_HOME", "").rstrip("/")
     if codex_home:
         name = Path(codex_home).name
-        if name.startswith(".codex"):
-            return name[1:]
+        if name:
+            return name.lstrip(".")
     return explicit or "codex"
 
 

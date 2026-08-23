@@ -16,8 +16,8 @@ jobs:
       - name: Test desktop companion
         run: |
           python3 -m unittest discover -s desktop/tests -v
-          bash -n install.sh desktop/install.sh phone/install-via-adb.sh scripts/package-desktop.sh
-          shellcheck install.sh desktop/install.sh phone/install-via-adb.sh scripts/package-desktop.sh
+          bash -n install-latest.sh install.sh desktop/install.sh scripts/package-desktop.sh
+          shellcheck install-latest.sh install.sh desktop/install.sh scripts/package-desktop.sh
           ./scripts/package-desktop.sh
 
   android:

@@ -15,6 +15,7 @@ trap cleanup EXIT
 install -d "${package_dir}/desktop"
 install -m 755 "${project_dir}/install.sh" "${package_dir}/install.sh"
 install -m 644 "${project_dir}/README.md" "${package_dir}/README.md"
+install -m 644 "${project_dir}/SECURITY.md" "${package_dir}/SECURITY.md"
 install -m 644 "${project_dir}/LICENSE" "${package_dir}/LICENSE"
 
 for source in \

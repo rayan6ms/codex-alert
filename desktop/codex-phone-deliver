@@ -34,13 +34,9 @@ DB_FILE = STATE_DIR / "phone-queue.sqlite3"
 LOCK_FILE = STATE_DIR / "phone-worker.lock"
 STATUS_FILE = STATE_DIR / "phone-status.json"
 LOG_FILE = STATE_DIR / "phone-delivery.log"
-ACTIVE_ALERT_FILE = STATE_DIR / "phone-active-alert.json"
 STATUS_NOTIFICATION_ID_FILE = STATE_DIR / "phone-status-notification-id"
 WAKE_SOCKET = STATE_DIR / "phone-worker.sock"
 SERVICE = "codex-phone-delivery.service"
-CLEAR_SERVICE = "codex-phone-clear-on-input.service"
-CLEAR_PATH = "codex-phone-clear-on-input.path"
-PRESENCE_FILE = Path("/run/codex-presence/last-input-ns")
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 RETRY_DELAYS = (5, 15, 30, 60)
 MAX_LOG_BYTES = 1024 * 1024
@@ -104,7 +100,6 @@ def connect_db():
             last_attempt_at REAL,
             next_attempt_at REAL NOT NULL,
             last_error TEXT NOT NULL DEFAULT '',
-            presence_baseline INTEGER,
             environment_id TEXT NOT NULL DEFAULT '',
             thread_id TEXT NOT NULL DEFAULT ''
         )
@@ -113,8 +108,6 @@ def connect_db():
     columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(delivery_queue)")
     }
-    if "presence_baseline" not in columns:
-        connection.execute("ALTER TABLE delivery_queue ADD COLUMN presence_baseline INTEGER")
     if "environment_id" not in columns:
         connection.execute(
             "ALTER TABLE delivery_queue ADD COLUMN environment_id TEXT NOT NULL DEFAULT ''"
@@ -163,48 +156,6 @@ def save_status(**changes):
 
 def queue_depth(connection):
     return int(connection.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0])
-
-
-def physical_input_stamp():
-    try:
-        return int(PRESENCE_FILE.read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
-        return None
-
-
-def load_active_alert():
-    try:
-        value = json.loads(ACTIVE_ALERT_FILE.read_text(encoding="utf-8"))
-        if isinstance(value, dict) and value.get("event_id"):
-            return value
-    except (OSError, ValueError):
-        pass
-    return None
-
-
-def save_active_alert(event_id, baseline):
-    # Pre-1.0 installations may provide an optional physical-input timestamp
-    # monitor. Fresh public installations do not need privileged input access.
-    if baseline is None:
-        return
-    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    value = {
-        "event_id": event_id,
-        "presence_baseline": baseline,
-        "delivered_at": time.time(),
-    }
-    temporary = ACTIVE_ALERT_FILE.with_name(
-        f"{ACTIVE_ALERT_FILE.name}.{os.getpid()}.tmp"
-    )
-    temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(ACTIVE_ALERT_FILE)
-    run([SYSTEMCTL, "--user", "start", "--no-block", CLEAR_PATH], 3)
-    run([SYSTEMCTL, "--user", "start", "--no-block", CLEAR_SERVICE], 3)
-
-
-def stop_clear_watcher():
-    run([SYSTEMCTL, "--user", "stop", "--no-block", CLEAR_PATH], 3)
 
 
 def run(command, timeout):
@@ -389,51 +340,6 @@ def deliver(event):
     return False, "", compact(error or "all direct app targets are unavailable", 1200)
 
 
-def clear_event(event_id):
-    try:
-        token = load_token()
-        context = tls_context()
-    except Exception as exc:
-        return False, "", compact(str(exc), 1200)
-
-    errors = []
-    for transport, host in direct_targets():
-        success, error, result = try_request(
-            host, transport, event_id, {"id": event_id}, token, context,
-            "/v1/clear", ("cleared", "stale", "already-clear"), "clear-attempt",
-        )
-        if success:
-            return True, transport, result
-        errors.append(f"{transport} {host}: {error}")
-    return False, "", compact(" | ".join(errors), 1200)
-
-
-def clear_active_alert():
-    active = load_active_alert()
-    if active is None:
-        stop_clear_watcher()
-        return 0
-    current_stamp = physical_input_stamp()
-    baseline = active.get("presence_baseline")
-    if current_stamp is None or baseline is None or current_stamp <= baseline:
-        return 0
-
-    event_id = str(active["event_id"])
-    success, transport, result = clear_event(event_id)
-    if not success:
-        log(event="clear-deferred", event_id=event_id, error=result)
-        return 1
-
-    # Do not erase state for a newer completion that arrived during the request.
-    current = load_active_alert()
-    if current is not None and current.get("event_id") == event_id:
-        ACTIVE_ALERT_FILE.unlink(missing_ok=True)
-        stop_clear_watcher()
-    log(event="cleared-on-desktop-input", event_id=event_id,
-        transport=transport, result=result)
-    return 0
-
-
 def notify_delivery_problem(depth, error):
     try:
         previous = int(STATUS_NOTIFICATION_ID_FILE.read_text(encoding="ascii").strip())
@@ -508,7 +414,6 @@ def activate_worker():
 def enqueue(args):
     now = time.time()
     event_id = args.event_id or str(uuid.uuid4())
-    presence_baseline = physical_input_stamp()
     with closing(connect_db()) as connection:
         connection.execute(
             "DELETE FROM delivery_history WHERE delivered_at < ?",
@@ -524,13 +429,13 @@ def enqueue(args):
             """
             INSERT OR IGNORE INTO delivery_queue
             (id, title, body, account, project, created_at, expires_at,
-             next_attempt_at, presence_baseline, environment_id, thread_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             next_attempt_at, environment_id, thread_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id, compact(args.title, 240), compact(args.body, 2400),
                 compact(args.account, 120), compact(args.project, 240),
-                now, now + args.ttl_hours * 3600, now, presence_baseline,
+                now, now + args.ttl_hours * 3600, now,
                 compact(args.environment_id, 128), compact(args.thread_id, 128),
             ),
         )
@@ -603,7 +508,6 @@ def worker():
 
                 success, transport, error = deliver(event)
                 if success:
-                    save_active_alert(event["id"], event["presence_baseline"])
                     connection.execute(
                         "INSERT OR REPLACE INTO delivery_history (id, delivered_at) VALUES (?, ?)",
                         (event["id"], time.time()),
@@ -674,7 +578,6 @@ def print_status():
             "ORDER BY created_at, rowid LIMIT 1"
         ).fetchone()
     status = load_status()
-    active_alert = load_active_alert()
     worker_rc, _, worker_output = run(
         [SYSTEMCTL, "--user", "is-active", SERVICE], 3
     )
@@ -687,10 +590,6 @@ def print_status():
     print("Targets: " + (", ".join(paired_phone.get("targets", [])) or "none"))
     print(f"Last successful delivery: {format_time(status.get('last_success_at'))}")
     print(f"Last transport: {status.get('last_success_transport', 'none')}")
-    print(
-        "Phone completion alert: "
-        + ("waiting for desktop acknowledgement" if active_alert else "none")
-    )
     if oldest:
         print(f"Oldest queued: {format_time(oldest['created_at'])}")
         print(f"Attempts: {oldest['attempts']}")
@@ -718,8 +617,6 @@ def main():
         return worker()
     if len(sys.argv) == 2 and sys.argv[1] == "status":
         return print_status()
-    if len(sys.argv) == 2 and sys.argv[1] == "clear-active":
-        return clear_active_alert()
     return enqueue(parse_enqueue(sys.argv[1:]))
 
 

@@ -23,15 +23,12 @@ class PhoneDeliveryTests(unittest.TestCase):
             "LOCK_FILE": state / "worker.lock",
             "STATUS_FILE": state / "status.json",
             "LOG_FILE": state / "delivery.log",
-            "ACTIVE_ALERT_FILE": state / "active-alert.json",
-            "PRESENCE_FILE": state / "presence-stamp",
             "STATUS_NOTIFICATION_ID_FILE": state / "notification-id",
             "WAKE_SOCKET": state / "worker.sock",
         }
         self.patchers = [patch.object(MODULE, name, value) for name, value in replacements.items()]
         for patcher in self.patchers:
             patcher.start()
-        MODULE.PRESENCE_FILE.write_text("100\n", encoding="ascii")
 
     def tearDown(self):
         for patcher in reversed(self.patchers):
@@ -92,13 +89,11 @@ class PhoneDeliveryTests(unittest.TestCase):
         self.assertTrue(all(transport == "tailscale-direct" for transport, _ in targets))
 
     @patch.object(MODULE, "clear_delivery_problem")
-    @patch.object(MODULE, "save_active_alert")
     @patch.object(MODULE, "deliver", return_value=(True, "lan-direct", ""))
-    def test_worker_removes_only_acknowledged_event(self, _deliver, _save_active, _clear):
+    def test_worker_removes_only_acknowledged_event(self, _deliver, _clear):
         with patch.object(MODULE, "activate_worker", return_value=True):
             MODULE.enqueue(self.args("event-3"))
         self.assertEqual(MODULE.worker(), 0)
-        _save_active.assert_called_once_with("event-3", 100)
         with closing(MODULE.connect_db()) as connection:
             self.assertEqual(MODULE.queue_depth(connection), 0)
         self.assertEqual(MODULE.load_status()["last_success_transport"], "lan-direct")
@@ -108,29 +103,6 @@ class PhoneDeliveryTests(unittest.TestCase):
             activate.assert_not_called()
         with closing(MODULE.connect_db()) as connection:
             self.assertEqual(MODULE.queue_depth(connection), 0)
-
-    @patch.object(MODULE, "clear_event", return_value=(True, "lan-direct", "cleared"))
-    @patch.object(MODULE, "stop_clear_watcher")
-    def test_desktop_input_clears_only_after_baseline(self, stop_watcher, clear_event):
-        MODULE.ACTIVE_ALERT_FILE.write_text(
-            '{"event_id":"event-clear","presence_baseline":100}\n', encoding="utf-8"
-        )
-        self.assertEqual(MODULE.clear_active_alert(), 0)
-        clear_event.assert_not_called()
-        self.assertTrue(MODULE.ACTIVE_ALERT_FILE.exists())
-
-        MODULE.PRESENCE_FILE.write_text("101\n", encoding="ascii")
-        self.assertEqual(MODULE.clear_active_alert(), 0)
-        clear_event.assert_called_once_with("event-clear")
-        self.assertFalse(MODULE.ACTIVE_ALERT_FILE.exists())
-        stop_watcher.assert_called_once()
-
-    @patch.object(MODULE, "run")
-    def test_public_install_needs_no_privileged_input_monitor(self, run):
-        MODULE.save_active_alert("event-without-monitor", None)
-        self.assertFalse(MODULE.ACTIVE_ALERT_FILE.exists())
-        run.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()

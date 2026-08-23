@@ -8,12 +8,20 @@ config_dir="${HOME}/.config/codex-alert"
 systemd_dir="${HOME}/.config/systemd/user"
 icon_dir="${HOME}/.local/share/icons/hicolor/scalable/apps"
 
-for command in python3 notify-send systemctl; do
-    if ! command -v "${command}" >/dev/null 2>&1; then
-        printf 'Missing required command: %s\n' "${command}" >&2
-        exit 1
-    fi
+missing=()
+for command in python3 notify-send systemctl install ln; do
+    command -v "${command}" >/dev/null 2>&1 || missing+=("${command}")
 done
+if (( ${#missing[@]} )); then
+    printf 'Missing required command(s): %s\n' "${missing[*]}" >&2
+    printf 'Fedora: sudo dnf install python3 libnotify\n' >&2
+    printf 'Ubuntu/Debian: sudo apt install python3 libnotify-bin\n' >&2
+    exit 1
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+    printf 'A working systemd user session is required. Log into your desktop and try again.\n' >&2
+    exit 1
+fi
 
 install -d -m 700 \
     "${lib_dir}" \
@@ -31,16 +39,6 @@ install -m 600 "${project_dir}/desktop/codex_alert_common.py" "${lib_dir}/codex_
 install -m 644 "${project_dir}/desktop/dev.rayan.codexalert.svg" \
     "${icon_dir}/dev.rayan.codexalert.svg"
 
-# Preserve credentials from pre-1.0 private installations without placing
-# device-specific material in the public package.
-legacy_config="${HOME}/.config/codex-notify"
-if [[ -f "${legacy_config}/phone-token" && ! -f "${config_dir}/phone-token" ]]; then
-    install -m 600 "${legacy_config}/phone-token" "${config_dir}/phone-token"
-fi
-if [[ -f "${legacy_config}/phone-server-cert.pem" && ! -f "${config_dir}/phone-cert.pem" ]]; then
-    install -m 600 "${legacy_config}/phone-server-cert.pem" "${config_dir}/phone-cert.pem"
-fi
-
 install -m 600 "${project_dir}/desktop/codex-phone-delivery.service" \
     "${systemd_dir}/codex-phone-delivery.service"
 install -m 600 "${project_dir}/desktop/codex-alert-hooks.service" \
@@ -50,8 +48,8 @@ install -m 600 "${project_dir}/desktop/codex-alert-hooks.timer" \
 
 systemctl --user daemon-reload
 systemctl --user enable --now codex-alert-hooks.timer >/dev/null
-"${bin_dir}/codex-alert" setup --quiet
+"${bin_dir}/codex-alert" setup
 
 printf '\nCodex Alert desktop is installed.\n'
-printf 'Desktop notifications now cover every detected Codex profile.\n'
-printf 'Next: install the Android APK, open it, then run: codex-alert pair\n'
+printf 'Run codex-alert test to check the desktop notification.\n'
+printf 'For phone alerts, install the Android app and run codex-alert pair.\n'

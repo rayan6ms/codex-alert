@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 from pathlib import Path
 
 
@@ -13,7 +12,6 @@ TOKEN_FILE = CONFIG_DIR / "phone-token"
 CERTIFICATE_FILE = CONFIG_DIR / "phone-cert.pem"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 STATE_DIR = HOME / ".local/state/codex-notify"
-CODEX_HOME_PATTERN = re.compile(r"^\.codex(?:[0-9]+|[_-][A-Za-z0-9._-]+)?$")
 
 
 def load_json(path, default=None):
@@ -58,12 +56,27 @@ def phone_configured():
 
 
 def codex_homes():
-    homes = []
+    candidates = []
+    configured = os.environ.get("CODEX_ALERT_CODEX_HOMES", "")
+    if configured:
+        candidates.extend(Path(value) for value in configured.split(os.pathsep) if value)
+    if os.environ.get("CODEX_HOME"):
+        candidates.append(Path(os.environ["CODEX_HOME"]))
     try:
-        candidates = HOME.iterdir()
+        candidates.extend(HOME.iterdir())
     except OSError:
-        return homes
+        pass
+
+    homes = []
+    seen = set()
     for candidate in candidates:
-        if candidate.is_dir() and CODEX_HOME_PATTERN.fullmatch(candidate.name):
+        if not candidate.is_dir() or not (candidate / "auth.json").is_file():
+            continue
+        try:
+            identity = candidate.resolve()
+        except OSError:
+            identity = candidate.absolute()
+        if identity not in seen:
+            seen.add(identity)
             homes.append(candidate)
     return sorted(homes, key=lambda path: (path.name != ".codex", path.name))
