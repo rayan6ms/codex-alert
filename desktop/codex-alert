@@ -20,7 +20,6 @@ from pathlib import Path
 from codex_alert_common import (
     CERTIFICATE_FILE,
     CONFIG_DIR,
-    HOME,
     PHONE_FILE,
     TOKEN_FILE,
     atomic_json,
@@ -68,9 +67,33 @@ def is_codex_alert_hook(value):
     return "codex-notify-stop" in command or "codex-alert hook" in command
 
 
-def sync_hook_file(path):
+def hook_target(path):
+    """Return the shared file behind a hook symlink without replacing the link."""
+    if not path.is_symlink():
+        return path
     try:
-        value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        target = path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"cannot safely update dangling hook symlink {path}: {exc}") from exc
+    if not target.is_file():
+        raise RuntimeError(f"hook symlink {path} does not point to a regular file")
+    return target
+
+
+def file_signature(path):
+    try:
+        status = path.stat()
+        return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def sync_hook_file(path):
+    target = hook_target(path)
+    original_signature = file_signature(target)
+    try:
+        source = target.read_text(encoding="utf-8") if original_signature else ""
+        value = json.loads(source) if source else {}
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"cannot safely update invalid JSON in {path}: {exc}") from exc
     if not isinstance(value, dict):
@@ -98,51 +121,20 @@ def sync_hook_file(path):
     if not found:
         stop.append(hook_definition())
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    rendered = json.dumps(value, indent=2) + "\n"
+    if source == rendered:
+        return False
 
-
-def remove_managed_hook(path):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
-        source = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise RuntimeError(f"cannot safely clean invalid JSON in {path}: {exc}") from exc
-    if "codex-notify-stop" not in source and "codex-alert hook" not in source:
-        return False
-    try:
-        value = json.loads(source)
-    except ValueError as exc:
-        raise RuntimeError(f"cannot safely clean invalid JSON in {path}: {exc}") from exc
-    try:
-        stop = value["hooks"]["Stop"]
-    except (KeyError, TypeError):
-        return False
-    if not isinstance(stop, list):
-        raise RuntimeError(f"cannot safely clean invalid Stop hooks in {path}")
-
-    changed = False
-    retained_groups = []
-    for group in stop:
-        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-            retained_groups.append(group)
-            continue
-        retained = [hook for hook in group["hooks"] if not is_codex_alert_hook(hook)]
-        changed |= len(retained) != len(group["hooks"])
-        if retained:
-            group["hooks"] = retained
-            retained_groups.append(group)
-    if not changed:
-        return False
-    value["hooks"]["Stop"] = retained_groups
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
+        temporary.write_text(rendered, encoding="utf-8")
+        temporary.chmod(0o600)
+        if file_signature(target) != original_signature:
+            raise RuntimeError(f"hooks changed while Codex Alert was updating {target}; retrying later")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return True
 
 
@@ -161,30 +153,23 @@ def hook_file_configured(path):
 
 def sync_hooks(quiet=False):
     homes = codex_homes()
-    active = {home.resolve() for home in homes}
     failures = []
+    shared_targets = {}
     for home in homes:
         try:
-            sync_hook_file(home / "hooks.json")
+            hook_path = home / "hooks.json"
+            target = hook_target(hook_path)
+            identity = target.resolve(strict=False)
+            shared_targets.setdefault(identity, hook_path)
         except RuntimeError as exc:
             failures.append(str(exc))
-    cleaned = 0
-    try:
-        candidates = list(HOME.iterdir())
-    except OSError:
-        candidates = []
-    for candidate in candidates:
-        hook_path = candidate / "hooks.json"
+    for hook_path in shared_targets.values():
         try:
-            identity = candidate.resolve()
-            if candidate.is_dir() and identity not in active and remove_managed_hook(hook_path):
-                cleaned += 1
+            sync_hook_file(hook_path)
         except RuntimeError as exc:
             failures.append(str(exc))
     if not quiet:
         print(f"Configured {sum(hook_file_configured(home / 'hooks.json') for home in homes)} authenticated Codex account(s).")
-        if cleaned:
-            print(f"Removed stale Codex Alert hooks from {cleaned} unauthenticated home(s).")
     for failure in failures:
         print(f"Warning: {failure}", file=sys.stderr)
     return 1 if failures else 0

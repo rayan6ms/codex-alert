@@ -88,32 +88,54 @@ class HookSetupTests(unittest.TestCase):
                 MODULE.sync_hook_file(path)
             self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
 
-    def test_stale_managed_hook_is_removed_without_touching_other_hooks(self):
+    def test_sync_through_symlink_updates_target_and_preserves_link(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "hooks.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "Stop": [
-                                {
-                                    "hooks": [
-                                        {"type": "command", "command": MODULE.HOOK_COMMAND},
-                                        {"type": "command", "command": "/usr/bin/keep-me"},
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertTrue(MODULE.remove_managed_hook(path))
-            value = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                value["hooks"]["Stop"][0]["hooks"],
-                [{"type": "command", "command": "/usr/bin/keep-me"}],
-            )
+            root = Path(temporary)
+            main = root / "main-hooks.json"
+            shadow = root / "shadow-hooks.json"
+            main.write_text('{"description":"shared"}\n', encoding="utf-8")
+            shadow.symlink_to(main)
+
+            MODULE.sync_hook_file(shadow)
+
+            self.assertTrue(shadow.is_symlink())
+            self.assertEqual(shadow.resolve(), main)
+            value = json.loads(main.read_text(encoding="utf-8"))
+            self.assertEqual(value["description"], "shared")
+            self.assertEqual(value["hooks"]["Stop"][0]["hooks"][0]["command"], MODULE.HOOK_COMMAND)
+
+            inode = main.stat().st_ino
+            self.assertFalse(MODULE.sync_hook_file(shadow))
+            self.assertEqual(main.stat().st_ino, inode)
+            self.assertTrue(shadow.is_symlink())
+
+    def test_dangling_hook_symlink_fails_without_replacing_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shadow = Path(temporary) / "hooks.json"
+            shadow.symlink_to(Path(temporary) / "missing-hooks.json")
+            with self.assertRaises(RuntimeError):
+                MODULE.sync_hook_file(shadow)
+            self.assertTrue(shadow.is_symlink())
+
+    def test_sync_deduplicates_shared_hook_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main_home = root / ".codex"
+            shadow_home = root / ".codex2"
+            main_home.mkdir()
+            shadow_home.mkdir()
+            main_hooks = main_home / "hooks.json"
+            main_hooks.write_text("{}\n", encoding="utf-8")
+            (shadow_home / "hooks.json").symlink_to(main_hooks)
+
+            with (
+                patch.object(MODULE, "codex_homes", return_value=[main_home, shadow_home]),
+                patch.object(MODULE, "sync_hook_file", wraps=MODULE.sync_hook_file) as sync,
+            ):
+                self.assertEqual(MODULE.sync_hooks(quiet=True), 0)
+
+            sync.assert_called_once_with(main_hooks)
+            self.assertTrue((shadow_home / "hooks.json").is_symlink())
 
 
 if __name__ == "__main__":

@@ -17,8 +17,9 @@ temporary directory, verifies its checksum, installs it for the current user,
 and removes the temporary files. It never uses `sudo`.
 
 Codex Alert detects accounts by Codex's `auth.json` marker, preserves unrelated
-hooks, and automatically notices accounts added or removed later. GNOME's native
-notification service is used, so no Shell extension is needed.
+hooks, preserves T3 Code's shared shadow-home symlinks, and automatically
+notices newly added accounts. GNOME's native notification service is used, so
+no Shell extension is needed.
 
 Check the result with:
 

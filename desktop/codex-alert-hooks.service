@@ -1,5 +1,5 @@
 [Unit]
-Description=Synchronize Codex Alert hooks across local Codex profiles
+Description=Synchronize Codex Alert across authenticated Codex accounts
 
 [Service]
 Type=oneshot

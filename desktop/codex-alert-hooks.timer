@@ -1,5 +1,5 @@
 [Unit]
-Description=Detect newly added Codex profiles for Codex Alert
+Description=Detect authenticated Codex accounts for Codex Alert
 
 [Timer]
 OnBootSec=1min

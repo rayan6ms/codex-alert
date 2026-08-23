@@ -62,7 +62,7 @@ def notify(title, body):
             NOTIFY_SEND,
             "--print-id",
             f"--replace-id={replace_id}",
-            "--app-name=Codex",
+            "--app-name=Codex Alert",
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
             "--urgency=normal",

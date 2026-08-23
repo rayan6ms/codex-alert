@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "CodexCompletionAlert"
+rootProject.name = "CodexAlert"
 include(":app")

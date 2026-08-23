@@ -348,7 +348,7 @@ def notify_delivery_problem(depth, error):
     result = subprocess.run(
         [
             "/usr/bin/notify-send", "--print-id", f"--replace-id={previous}",
-            "--app-name=Codex", "--urgency=low",
+            "--app-name=Codex Alert", "--urgency=low",
             "Phone alerts are waiting",
             f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
         ],
