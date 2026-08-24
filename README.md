@@ -18,7 +18,8 @@ and removes the temporary files. It never uses `sudo`.
 
 Codex Alert detects accounts by Codex's `auth.json` marker, preserves unrelated
 hooks, preserves T3 Code's shared shadow-home symlinks, and automatically
-notices newly added accounts.
+notices newly added accounts. It also revalidates its completion hook after a
+Codex upgrade changes the hook's trust identity.
 
 Desktop alerts use the standard [freedesktop.org notification service](https://specifications.freedesktop.org/notification/latest/),
 so the same installer works on GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt,

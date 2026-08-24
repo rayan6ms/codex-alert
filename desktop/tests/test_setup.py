@@ -194,6 +194,11 @@ class HookSetupTests(unittest.TestCase):
             self.assertEqual(value["hooks"]["Start"][0]["hooks"][0]["command"], "/usr/bin/start-hook")
             self.assertEqual(len(stop_entries), 1)
             self.assertEqual(stop_entries[0]["command"], MODULE.HOOK_COMMAND)
+            self.assertEqual(value["hooks"]["Stop"][-1], MODULE.hook_definition())
+            self.assertEqual(
+                value["hooks"]["Stop"][0]["hooks"],
+                [{"type": "command", "command": "/usr/bin/other"}],
+            )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_invalid_json_is_never_overwritten(self):
@@ -247,11 +252,101 @@ class HookSetupTests(unittest.TestCase):
             with (
                 patch.object(MODULE, "codex_homes", return_value=[main_home, shadow_home]),
                 patch.object(MODULE, "sync_hook_file", wraps=MODULE.sync_hook_file) as sync,
+                patch.object(MODULE, "hook_trust_cache_valid", return_value=False),
+                patch.object(MODULE, "ensure_hook_trust", return_value=(2, [])) as trust,
             ):
                 self.assertEqual(MODULE.sync_hooks(quiet=True), 0)
 
             sync.assert_called_once_with(main_hooks)
+            trust.assert_called_once_with([main_home, shadow_home])
             self.assertTrue((shadow_home / "hooks.json").is_symlink())
+
+    def test_trust_refresh_updates_only_codex_alert_hook_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.toml"
+            config.write_text("[hooks.state]\n", encoding="utf-8")
+            first = root / ".codex"
+            second = root / ".codex2"
+            homes = [first, second]
+            current_hash = "sha256:" + "a" * 64
+            modified = {
+                "key": f"{first}/hooks.json:stop:3:0",
+                "currentHash": current_hash,
+                "trustStatus": "modified",
+                "enabled": True,
+            }
+            trusted = dict(modified, trustStatus="trusted")
+            client = Mock()
+            context = Mock()
+            context.__enter__ = Mock(return_value=client)
+            context.__exit__ = Mock(return_value=False)
+
+            with (
+                patch.object(MODULE, "homes_by_config", return_value={config: homes}),
+                patch.object(MODULE, "CodexAppServer", return_value=context),
+                patch.object(MODULE, "codex_alert_hook_metadata", side_effect=[modified, trusted]),
+                patch.object(
+                    MODULE,
+                    "group_hook_keys",
+                    return_value={
+                        first: f"{first}/hooks.json:stop:3:0",
+                        second: f"{second}/hooks.json:stop:3:0",
+                    },
+                ),
+                patch.object(MODULE, "save_hook_trust_cache") as save_cache,
+                patch.object(
+                    MODULE,
+                    "hook_state",
+                    side_effect=[{}, {}, {"trusted_hash": current_hash}, {"trusted_hash": current_hash}],
+                ),
+            ):
+                active, failures = MODULE.ensure_hook_trust(homes)
+
+            self.assertEqual((active, failures), (2, []))
+            save_cache.assert_called_once()
+            write = client.request.call_args.args
+            self.assertEqual(write[0], "config/batchWrite")
+            value = write[1]["edits"][0]["value"]
+            self.assertEqual(
+                value,
+                {
+                    f"{first}/hooks.json:stop:3:0": {
+                        "trusted_hash": current_hash,
+                        "enabled": True,
+                    },
+                    f"{second}/hooks.json:stop:3:0": {
+                        "trusted_hash": current_hash,
+                        "enabled": True,
+                    },
+                },
+            )
+
+    def test_hook_keys_follow_each_accounts_actual_group_position(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / ".codex"
+            second = root / ".codex2"
+            first.mkdir()
+            second.mkdir()
+            other = {"hooks": [{"type": "command", "command": "/usr/bin/other"}]}
+            (first / "hooks.json").write_text(
+                json.dumps({"hooks": {"Stop": [other, MODULE.hook_definition()]}}),
+                encoding="utf-8",
+            )
+            (second / "hooks.json").write_text(
+                json.dumps({"hooks": {"Stop": [other, other, MODULE.hook_definition()]}}),
+                encoding="utf-8",
+            )
+            metadata = {"key": f"{first}/hooks.json:stop:1:0"}
+
+            self.assertEqual(
+                MODULE.group_hook_keys([first, second], first, metadata),
+                {
+                    first: f"{first}/hooks.json:stop:1:0",
+                    second: f"{second}/hooks.json:stop:2:0",
+                },
+            )
 
     def test_cross_desktop_watcher_syncs_immediately(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -265,6 +360,23 @@ class HookSetupTests(unittest.TestCase):
                 MODULE.watch_hooks()
 
             sync.assert_called_once_with(quiet=True)
+
+    def test_quiet_timer_uses_valid_trust_cache_without_starting_codex(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".codex"
+            home.mkdir()
+            (home / "hooks.json").write_text(
+                json.dumps({"hooks": {"Stop": [MODULE.hook_definition()]}}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(MODULE, "codex_homes", return_value=[home]),
+                patch.object(MODULE, "hook_trust_cache_valid", return_value=True),
+                patch.object(MODULE, "ensure_hook_trust") as trust,
+            ):
+                self.assertEqual(MODULE.sync_hooks(quiet=True), 0)
+
+            trust.assert_not_called()
 
 
 if __name__ == "__main__":

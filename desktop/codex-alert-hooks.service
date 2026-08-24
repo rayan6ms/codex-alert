@@ -9,5 +9,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 LockPersonality=true
-MemoryMax=64M
+MemoryMax=256M
 TasksMax=16

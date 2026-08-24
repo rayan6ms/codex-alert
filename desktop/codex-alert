@@ -11,12 +11,14 @@ import ipaddress
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from codex_alert_common import (
     TOKEN_FILE,
     atomic_json,
     codex_homes,
+    load_json,
     phone,
     phone_configured,
     set_t3_enabled,
@@ -40,7 +43,9 @@ PHONE_DELIVER = Path.home() / ".local/bin/codex-phone-deliver"
 DESKTOP_NOTIFY = Path.home() / ".local/bin/codex-notify-stop-desktop"
 PAIR_CODE = re.compile(r"[0-9]{8}")
 WATCH_LOCK = Path.home() / ".local/state/codex-notify/account-watch.lock"
+HOOK_TRUST_CACHE = Path.home() / ".local/state/codex-notify/hook-trust-cache.json"
 WATCH_INTERVAL_SECONDS = 5 * 60
+RPC_TIMEOUT_SECONDS = 10
 
 
 def run(command, timeout=10):
@@ -51,6 +56,19 @@ def run(command, timeout=10):
         capture_output=True,
         text=True,
     )
+
+
+def codex_binary():
+    configured = os.environ.get("CODEX_ALERT_CODEX_BIN")
+    if configured:
+        return configured
+    discovered = shutil.which("codex")
+    if discovered:
+        return discovered
+    user_install = Path.home() / ".local/bin/codex"
+    if user_install.is_file() and os.access(user_install, os.X_OK):
+        return str(user_install)
+    return None
 
 
 def hook_definition():
@@ -111,20 +129,21 @@ def sync_hook_file(path):
     if not isinstance(stop, list):
         raise RuntimeError(f"cannot safely update invalid Stop hooks in {path}")
 
-    found = False
+    # Keep our hook in a dedicated, match-all group. This makes its behavior and
+    # Codex trust identity deterministic while preserving every unrelated hook.
+    cleaned_stop = []
     for group in stop:
         if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            cleaned_stop.append(group)
             continue
-        for index, entry in enumerate(group["hooks"]):
-            if is_codex_alert_hook(entry):
-                if not found:
-                    group["hooks"][index] = hook_definition()["hooks"][0]
-                    found = True
-                else:
-                    group["hooks"][index] = None
-        group["hooks"] = [entry for entry in group["hooks"] if entry is not None]
-    if not found:
-        stop.append(hook_definition())
+        retained = [entry for entry in group["hooks"] if not is_codex_alert_hook(entry)]
+        if retained:
+            group["hooks"] = retained
+            cleaned_stop.append(group)
+        elif not any(is_codex_alert_hook(entry) for entry in group["hooks"]):
+            cleaned_stop.append(group)
+    cleaned_stop.append(hook_definition())
+    hooks["Stop"] = cleaned_stop
 
     rendered = json.dumps(value, indent=2) + "\n"
     if source == rendered:
@@ -156,6 +175,325 @@ def hook_file_configured(path):
         return False
 
 
+class CodexAppServer:
+    """Small JSONL client for Codex's authoritative hook catalog/config APIs."""
+
+    def __init__(self, home):
+        binary = codex_binary()
+        if not binary:
+            raise RuntimeError("Codex CLI is unavailable; cannot verify completion-hook trust")
+        environment = os.environ.copy()
+        environment["CODEX_HOME"] = str(home)
+        self.process = subprocess.Popen(
+            [binary, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+            env=environment,
+            start_new_session=True,
+        )
+        self.next_id = 1
+        self.output_buffer = b""
+        try:
+            self.request(
+                "initialize",
+                {
+                    "clientInfo": {
+                        "name": "codex_alert",
+                        "title": "Codex Alert",
+                        "version": "1",
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            )
+            self.notify("initialized", {})
+        except Exception:
+            self.close()
+            raise
+
+    def send(self, message):
+        if self.process.stdin is None:
+            raise RuntimeError("Codex app server input is unavailable")
+        encoded = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        self.process.stdin.write(encoded)
+        self.process.stdin.flush()
+
+    def notify(self, method, params):
+        self.send({"method": method, "params": params})
+
+    def request(self, method, params):
+        request_id = self.next_id
+        self.next_id += 1
+        self.send({"method": method, "id": request_id, "params": params})
+        deadline = time.monotonic() + RPC_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"Codex app server timed out during {method}")
+            if self.process.stdout is None:
+                raise RuntimeError("Codex app server output is unavailable")
+            while b"\n" not in self.output_buffer:
+                readable, _, _ = select.select([self.process.stdout], [], [], remaining)
+                if not readable:
+                    raise RuntimeError(f"Codex app server timed out during {method}")
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+                if not chunk:
+                    raise RuntimeError(f"Codex app server closed during {method}")
+                self.output_buffer += chunk
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 and b"\n" not in self.output_buffer:
+                    raise RuntimeError(f"Codex app server timed out during {method}")
+            line, self.output_buffer = self.output_buffer.split(b"\n", 1)
+            try:
+                response = json.loads(line)
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if response.get("id") != request_id:
+                continue
+            if "error" in response:
+                error = response["error"]
+                message = error.get("message") if isinstance(error, dict) else str(error)
+                raise RuntimeError(f"Codex app server rejected {method}: {message}")
+            return response.get("result", {})
+
+    def close(self):
+        if self.process.stdin is not None:
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _type, _value, _traceback):
+        self.close()
+
+
+def config_target(home):
+    path = home / "config.toml"
+    try:
+        return path.resolve(strict=path.is_symlink())
+    except OSError as exc:
+        raise RuntimeError(f"cannot safely resolve Codex config {path}: {exc}") from exc
+
+
+def homes_by_config(homes):
+    groups = {}
+    for home in homes:
+        groups.setdefault(config_target(home), []).append(home)
+    return groups
+
+
+def codex_alert_hook_metadata(client, home):
+    result = client.request("hooks/list", {"cwds": [str(Path.cwd())]})
+    entries = result.get("data", [])
+    if not entries:
+        raise RuntimeError(f"Codex returned no hook catalog for {home}")
+    catalog = entries[0]
+    errors = catalog.get("errors") or []
+    if errors:
+        message = errors[0].get("message") if isinstance(errors[0], dict) else str(errors[0])
+        raise RuntimeError(f"Codex could not load hooks for {home}: {message}")
+    expected_source = str(home / "hooks.json")
+    matches = [
+        hook
+        for hook in catalog.get("hooks", [])
+        if hook.get("handlerType") == "command"
+        and hook.get("command") == HOOK_COMMAND
+        and hook.get("sourcePath") == expected_source
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"Codex did not discover exactly one Codex Alert hook for {home}")
+    return matches[0]
+
+
+def hook_state(config_path, key):
+    try:
+        value = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        state = value.get("hooks", {}).get("state", {}).get(key, {})
+        return state if isinstance(state, dict) else {}
+    except (AttributeError, OSError, TypeError, ValueError):
+        return {}
+
+
+def group_hook_keys(homes, representative, metadata):
+    keys = {home: configured_hook_key(home) for home in homes}
+    if keys[representative] != metadata.get("key"):
+        raise RuntimeError(f"Codex returned an unexpected hook key for {representative}")
+    return keys
+
+
+def configured_hook_key(home):
+    path = home / "hooks.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        matches = [
+            f"{path}:stop:{group_index}:{handler_index}"
+            for group_index, group in enumerate(value.get("hooks", {}).get("Stop", []))
+            if isinstance(group, dict)
+            for handler_index, hook in enumerate(group.get("hooks", []))
+            if is_codex_alert_hook(hook)
+        ]
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"cannot determine Codex Alert hook key in {path}: {exc}") from exc
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one Codex Alert hook in {path}")
+    return matches[0]
+
+
+def path_identity(path):
+    try:
+        resolved = path.resolve(strict=True)
+        signature = file_signature(resolved)
+        return [str(resolved), *signature] if signature else None
+    except OSError:
+        return None
+
+
+def codex_binary_identity():
+    binary = codex_binary()
+    return path_identity(Path(binary)) if binary else None
+
+
+def hook_source_identities(homes):
+    return {str(home): path_identity(home / "hooks.json") for home in homes}
+
+
+def hook_trust_cache_valid(homes):
+    cache = load_json(HOOK_TRUST_CACHE)
+    if cache.get("version") != 1:
+        return False
+    if cache.get("codex_binary") != codex_binary_identity():
+        return False
+    if cache.get("hook_sources") != hook_source_identities(homes):
+        return False
+    entries = cache.get("entries")
+    if not isinstance(entries, list) or len(entries) != len(homes):
+        return False
+    expected_homes = {str(home) for home in homes}
+    if {entry.get("home") for entry in entries if isinstance(entry, dict)} != expected_homes:
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        current_hash = entry.get("current_hash")
+        config = entry.get("config")
+        key = entry.get("key")
+        if not isinstance(config, str) or not config or not isinstance(key, str) or not key:
+            return False
+        state = hook_state(Path(config), key)
+        if (
+            not isinstance(current_hash, str)
+            or state.get("trusted_hash") != current_hash
+            or state.get("enabled") is False
+        ):
+            return False
+    return True
+
+
+def save_hook_trust_cache(homes, entries):
+    atomic_json(HOOK_TRUST_CACHE, {
+        "version": 1,
+        "codex_binary": codex_binary_identity(),
+        "hook_sources": hook_source_identities(homes),
+        "entries": entries,
+    })
+
+
+def inspect_hook_trust(homes):
+    """Return (trusted homes, total homes, issues) using Codex's live hook catalog."""
+    trusted = 0
+    issues = []
+    for config_path, group in homes_by_config(homes).items():
+        representative = group[0]
+        try:
+            with CodexAppServer(representative) as client:
+                metadata = codex_alert_hook_metadata(client, representative)
+            current_hash = metadata.get("currentHash")
+            keys = group_hook_keys(group, representative, metadata)
+            for home, key in keys.items():
+                state = hook_state(config_path, key)
+                if (
+                    current_hash
+                    and state.get("trusted_hash") == current_hash
+                    and state.get("enabled") is not False
+                ):
+                    trusted += 1
+                else:
+                    issues.append(f"completion hook is not trusted and enabled for {home}")
+        except RuntimeError as exc:
+            issues.append(str(exc))
+    return trusted, len(homes), issues
+
+
+def ensure_hook_trust(homes):
+    """Trust and enable only the exact completion hook installed by Codex Alert."""
+    trusted = 0
+    failures = []
+    cache_entries = []
+    for config_path, group in homes_by_config(homes).items():
+        representative = group[0]
+        try:
+            with CodexAppServer(representative) as client:
+                metadata = codex_alert_hook_metadata(client, representative)
+                current_hash = metadata.get("currentHash")
+                if not isinstance(current_hash, str) or not current_hash.startswith("sha256:"):
+                    raise RuntimeError(f"Codex returned an invalid hook hash for {representative}")
+                keys = group_hook_keys(group, representative, metadata)
+                updates = {}
+                for key in keys.values():
+                    state = hook_state(config_path, key)
+                    if state.get("trusted_hash") != current_hash or state.get("enabled") is False:
+                        updates[key] = {"trusted_hash": current_hash, "enabled": True}
+                if updates:
+                    client.request(
+                        "config/batchWrite",
+                        {
+                            "edits": [{
+                                "keyPath": "hooks.state",
+                                "value": updates,
+                                "mergeStrategy": "upsert",
+                            }],
+                            "reloadUserConfig": True,
+                        },
+                    )
+                verified = codex_alert_hook_metadata(client, representative)
+                if verified.get("trustStatus") != "trusted" or verified.get("enabled") is not True:
+                    raise RuntimeError(f"Codex did not activate the completion hook for {representative}")
+            for home, key in keys.items():
+                state = hook_state(config_path, key)
+                if state.get("trusted_hash") == current_hash and state.get("enabled") is not False:
+                    trusted += 1
+                    cache_entries.append({
+                        "home": str(home),
+                        "config": str(config_path),
+                        "key": key,
+                        "current_hash": current_hash,
+                    })
+                else:
+                    failures.append(f"completion hook state was not saved for {key}")
+        except RuntimeError as exc:
+            failures.append(str(exc))
+    if not failures and trusted == len(homes):
+        save_hook_trust_cache(homes, cache_entries)
+    else:
+        HOOK_TRUST_CACHE.unlink(missing_ok=True)
+    return trusted, failures
+
+
 def sync_hooks(quiet=False):
     homes = codex_homes()
     failures = []
@@ -173,8 +511,15 @@ def sync_hooks(quiet=False):
             sync_hook_file(hook_path)
         except RuntimeError as exc:
             failures.append(str(exc))
+    trusted = 0
+    if not failures and quiet and hook_trust_cache_valid(homes):
+        trusted = len(homes)
+    elif not failures:
+        trusted, trust_failures = ensure_hook_trust(homes)
+        failures.extend(trust_failures)
     if not quiet:
-        print(f"Configured {sum(hook_file_configured(home / 'hooks.json') for home in homes)} authenticated Codex account(s).")
+        configured = sum(hook_file_configured(home / "hooks.json") for home in homes)
+        print(f"Configured {configured} authenticated Codex account(s); {trusted} active completion hook(s).")
     for failure in failures:
         print(f"Warning: {failure}", file=sys.stderr)
     return 1 if failures else 0
@@ -474,7 +819,10 @@ def test_all():
 def status():
     homes = codex_homes()
     configured = sum(hook_file_configured(home / "hooks.json") for home in homes)
-    print(f"Desktop hooks: {configured}/{len(homes)} authenticated Codex accounts")
+    trusted, total, issues = inspect_hook_trust(homes) if homes else (0, 0, [])
+    print(f"Desktop hooks: {trusted}/{total} active ({configured}/{len(homes)} configured)")
+    for issue in issues:
+        print(f"  Warning: {issue}")
     print(
         "Desktop notifications: "
         + ("freedesktop.org service" if shutil.which("notify-send") else "unavailable (notify-send missing)")
