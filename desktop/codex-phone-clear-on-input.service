@@ -1,0 +1,13 @@
+[Unit]
+Description=Dismiss the current phone alert after new desktop input
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/codex-phone-deliver clear-watch
+UMask=0077
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+MemoryMax=64M
+TasksMax=8

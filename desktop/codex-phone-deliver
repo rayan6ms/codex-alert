@@ -29,6 +29,8 @@ from codex_alert_common import (
 
 
 HOME = Path.home()
+DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+APP_ICON = DATA_HOME / "icons/hicolor/scalable/apps/dev.rayan.codexalert.svg"
 SYSTEMCTL = shutil.which("systemctl")
 NOTIFY_SEND = shutil.which("notify-send")
 GDBUS = shutil.which("gdbus")
@@ -37,12 +39,17 @@ DB_FILE = STATE_DIR / "phone-queue.sqlite3"
 LOCK_FILE = STATE_DIR / "phone-worker.lock"
 STATUS_FILE = STATE_DIR / "phone-status.json"
 LOG_FILE = STATE_DIR / "phone-delivery.log"
+ACTIVE_ALERT_FILE = STATE_DIR / "phone-active-alert.json"
+CLEAR_LOCK_FILE = STATE_DIR / "phone-clear-watcher.lock"
 STATUS_NOTIFICATION_ID_FILE = STATE_DIR / "phone-status-notification-id"
 WAKE_SOCKET = STATE_DIR / "phone-worker.sock"
 SERVICE = "codex-phone-delivery.service"
+CLEAR_SERVICE = "codex-phone-clear-on-input.service"
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 RETRY_DELAYS = (5, 15, 30, 60)
 MAX_LOG_BYTES = 1024 * 1024
+CLEAR_WATCH_SECONDS = 24 * 60 * 60
+INPUT_STAMP_TOLERANCE_NS = 5_000_000
 
 
 def clean_environment():
@@ -103,6 +110,7 @@ def connect_db():
             last_attempt_at REAL,
             next_attempt_at REAL NOT NULL,
             last_error TEXT NOT NULL DEFAULT '',
+            presence_baseline INTEGER,
             environment_id TEXT NOT NULL DEFAULT '',
             thread_id TEXT NOT NULL DEFAULT ''
         )
@@ -119,6 +127,8 @@ def connect_db():
         connection.execute(
             "ALTER TABLE delivery_queue ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''"
         )
+    if "presence_baseline" not in columns:
+        connection.execute("ALTER TABLE delivery_queue ADD COLUMN presence_baseline INTEGER")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS delivery_history (
@@ -159,6 +169,101 @@ def save_status(**changes):
 
 def queue_depth(connection):
     return int(connection.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0])
+
+
+def desktop_activity_stamp():
+    """Return the approximate monotonic timestamp of the last physical input.
+
+    GNOME's idle monitor is session-scoped, needs no elevated input access, and
+    reports only elapsed idle time. Turning that into a timestamp lets us tell
+    whether input happened after a particular completion without recording any
+    keys, buttons, or pointer coordinates.
+    """
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        result = connection.call_sync(
+            "org.gnome.Mutter.IdleMonitor",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "org.gnome.Mutter.IdleMonitor",
+            "GetIdletime",
+            None,
+            GLib.VariantType.new("(t)"),
+            Gio.DBusCallFlags.NONE,
+            1_000,
+            None,
+        )
+        idle_milliseconds = int(result.unpack()[0])
+        return time.monotonic_ns() - idle_milliseconds * 1_000_000
+    except Exception:
+        return None
+
+
+def load_active_alert():
+    try:
+        value = json.loads(ACTIVE_ALERT_FILE.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("event_id"):
+            return value
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def activate_clear_watcher():
+    start_error = "systemd user service is unavailable"
+    if SYSTEMCTL:
+        try:
+            start = subprocess.run(
+                [SYSTEMCTL, "--user", "start", "--no-block", CLEAR_SERVICE],
+                env=clean_environment(), check=False, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            )
+            if start.returncode == 0:
+                return True
+            start_error = start.stderr
+        except OSError as exc:
+            start_error = repr(exc)
+
+    try:
+        subprocess.Popen(
+            [str(Path(__file__).resolve()), "clear-watch"],
+            env=clean_environment(), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+        )
+        log(event="clear-watcher-fallback", error=compact(start_error, 500))
+        return True
+    except Exception as exc:
+        log(event="clear-watcher-start-failed", error=repr(exc))
+        return False
+
+
+def save_active_alert(event_id, baseline):
+    if baseline is None:
+        log(event="desktop-activity-unavailable", event_id=event_id)
+        return False
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        value = {
+            "event_id": event_id,
+            "presence_baseline": int(baseline),
+            "delivered_at": time.time(),
+        }
+        temporary = ACTIVE_ALERT_FILE.with_name(
+            f"{ACTIVE_ALERT_FILE.name}.{os.getpid()}.tmp"
+        )
+        temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(ACTIVE_ALERT_FILE)
+        started = activate_clear_watcher()
+        log(event="clear-watcher-armed", event_id=event_id, started=started)
+        return started
+    except OSError as exc:
+        log(event="clear-watcher-state-failed", event_id=event_id, error=repr(exc))
+        return False
 
 
 def run(command, timeout):
@@ -323,6 +428,101 @@ def try_direct(host, transport, event, token, context):
     return success, error
 
 
+def clear_event(event_id):
+    try:
+        token = load_token()
+        context = tls_context()
+    except Exception as exc:
+        return False, "", compact(str(exc), 1200)
+
+    errors = []
+    for transport, host in direct_targets():
+        success, error, result = try_request(
+            host,
+            transport,
+            event_id,
+            {"id": event_id},
+            token,
+            context,
+            "/v1/clear",
+            ("cleared", "stale", "already-clear"),
+            "clear-attempt",
+        )
+        if success:
+            return True, transport, result
+        errors.append(f"{transport} {host}: {error}")
+    return False, "", compact(" | ".join(errors), 1200)
+
+
+def clear_active_alert(current_stamp=None):
+    active = load_active_alert()
+    if active is None:
+        return 0
+    if current_stamp is None:
+        current_stamp = desktop_activity_stamp()
+    try:
+        baseline = int(active["presence_baseline"])
+    except (KeyError, TypeError, ValueError):
+        log(event="clear-watcher-invalid-state", event_id=active.get("event_id", ""))
+        ACTIVE_ALERT_FILE.unlink(missing_ok=True)
+        return 0
+    if current_stamp is None:
+        return 0
+    if current_stamp <= baseline + INPUT_STAMP_TOLERANCE_NS:
+        return 0
+
+    event_id = str(active["event_id"])
+    success, transport, result = clear_event(event_id)
+    if not success:
+        log(event="clear-deferred", event_id=event_id, error=result)
+        return 1
+
+    # A newer completion may arrive while the authenticated request is in
+    # flight. Never remove the newer event's watcher state.
+    current = load_active_alert()
+    if current is not None and current.get("event_id") == event_id:
+        ACTIVE_ALERT_FILE.unlink(missing_ok=True)
+    log(event="cleared-on-desktop-input", event_id=event_id,
+        transport=transport, result=result)
+    return 0
+
+
+def clear_watch():
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with CLEAR_LOCK_FILE.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+
+        log(event="clear-watcher-started")
+        while True:
+            active = load_active_alert()
+            if active is None:
+                log(event="clear-watcher-idle")
+                return 0
+            try:
+                delivered_at = float(active.get("delivered_at", 0))
+            except (TypeError, ValueError):
+                delivered_at = 0
+            if time.time() - delivered_at >= CLEAR_WATCH_SECONDS:
+                # Remove only the same expired state; a newer completion may
+                # replace it between this read and the unlink decision.
+                current = load_active_alert()
+                if current is not None and current.get("event_id") == active.get("event_id"):
+                    ACTIVE_ALERT_FILE.unlink(missing_ok=True)
+                log(event="clear-watcher-expired", event_id=active["event_id"])
+                return 0
+            current_stamp = desktop_activity_stamp()
+            if current_stamp is None:
+                log(event="clear-watcher-unavailable", event_id=active["event_id"])
+                return 0
+            result = clear_active_alert(current_stamp)
+            if load_active_alert() is None:
+                return result
+            time.sleep(5 if result else 0.75)
+
+
 def deliver(event):
     try:
         token = load_token()
@@ -353,7 +553,9 @@ def notify_delivery_problem(depth, error):
     result = subprocess.run(
         [
             NOTIFY_SEND, "--print-id", f"--replace-id={previous}",
-            "--app-name=Codex Alert", "--urgency=low",
+            "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
+            f"--icon={APP_ICON}",
+            "--hint=string:desktop-entry:dev.rayan.codexalert", "--urgency=low",
             "Phone alerts are waiting",
             f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
         ],
@@ -362,7 +564,9 @@ def notify_delivery_problem(depth, error):
     if result.returncode != 0:
         result = subprocess.run(
             [
-                NOTIFY_SEND, "--app-name=Codex Alert", "--urgency=low",
+                NOTIFY_SEND, "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
+                f"--icon={APP_ICON}",
+                "--hint=string:desktop-entry:dev.rayan.codexalert", "--urgency=low",
                 "Phone alerts are waiting",
                 f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
             ],
@@ -436,6 +640,7 @@ def activate_worker():
 def enqueue(args):
     now = time.time()
     event_id = args.event_id or str(uuid.uuid4())
+    presence_baseline = desktop_activity_stamp()
     with closing(connect_db()) as connection:
         connection.execute(
             "DELETE FROM delivery_history WHERE delivered_at < ?",
@@ -451,13 +656,13 @@ def enqueue(args):
             """
             INSERT OR IGNORE INTO delivery_queue
             (id, title, body, account, project, created_at, expires_at,
-             next_attempt_at, environment_id, thread_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             next_attempt_at, presence_baseline, environment_id, thread_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id, compact(args.title, 240), compact(args.body, 2400),
                 compact(args.account, 120), compact(args.project, 240),
-                now, now + args.ttl_hours * 3600, now,
+                now, now + args.ttl_hours * 3600, now, presence_baseline,
                 compact(args.environment_id, 128), compact(args.thread_id, 128),
             ),
         )
@@ -530,6 +735,7 @@ def worker():
 
                 success, transport, error = deliver(event)
                 if success:
+                    save_active_alert(event["id"], event["presence_baseline"])
                     connection.execute(
                         "INSERT OR REPLACE INTO delivery_history (id, delivered_at) VALUES (?, ?)",
                         (event["id"], time.time()),
@@ -618,6 +824,8 @@ def print_status():
     print("Targets: " + (", ".join(paired_phone.get("targets", [])) or "none"))
     print(f"Last successful delivery: {format_time(status.get('last_success_at'))}")
     print(f"Last transport: {status.get('last_success_transport', 'none')}")
+    activity = "available" if desktop_activity_stamp() is not None else "unavailable"
+    print(f"Desktop activity dismissal: {activity}")
     if oldest:
         print(f"Oldest queued: {format_time(oldest['created_at'])}")
         print(f"Attempts: {oldest['attempts']}")
@@ -645,6 +853,10 @@ def main():
         return worker()
     if len(sys.argv) == 2 and sys.argv[1] == "status":
         return print_status()
+    if len(sys.argv) == 2 and sys.argv[1] == "clear-watch":
+        return clear_watch()
+    if len(sys.argv) == 2 and sys.argv[1] == "clear-active":
+        return clear_active_alert()
     return enqueue(parse_enqueue(sys.argv[1:]))
 
 

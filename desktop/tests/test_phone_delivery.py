@@ -23,10 +23,16 @@ class PhoneDeliveryTests(unittest.TestCase):
             "LOCK_FILE": state / "worker.lock",
             "STATUS_FILE": state / "status.json",
             "LOG_FILE": state / "delivery.log",
+            "ACTIVE_ALERT_FILE": state / "active-alert.json",
+            "CLEAR_LOCK_FILE": state / "clear-watcher.lock",
             "STATUS_NOTIFICATION_ID_FILE": state / "notification-id",
             "WAKE_SOCKET": state / "worker.sock",
         }
         self.patchers = [patch.object(MODULE, name, value) for name, value in replacements.items()]
+        self.patchers.extend((
+            patch.object(MODULE, "desktop_activity_stamp", return_value=1_000_000_000),
+            patch.object(MODULE, "activate_clear_watcher", return_value=True),
+        ))
         for patcher in self.patchers:
             patcher.start()
 
@@ -56,6 +62,7 @@ class PhoneDeliveryTests(unittest.TestCase):
             event = MODULE.next_event(connection)
             self.assertEqual(event["environment_id"], "environment-1")
             self.assertEqual(event["thread_id"], "thread-1")
+            self.assertEqual(event["presence_baseline"], 1_000_000_000)
 
     @patch.object(MODULE, "discover_lan_targets", return_value=[("lan-mdns", "192.168.1.50")])
     @patch.object(
@@ -113,6 +120,51 @@ class PhoneDeliveryTests(unittest.TestCase):
             self.assertTrue(MODULE.activate_worker())
 
         self.assertEqual(popen.call_args.args[0][-1], "worker")
+
+    def test_new_desktop_input_clears_only_the_matching_phone_alert(self):
+        baseline = 1_000_000_000
+        self.assertTrue(MODULE.save_active_alert("event-clear", baseline))
+        with patch.object(
+            MODULE,
+            "clear_event",
+            return_value=(True, "lan-direct", "cleared"),
+        ) as clear:
+            self.assertEqual(
+                MODULE.clear_active_alert(baseline + MODULE.INPUT_STAMP_TOLERANCE_NS + 1),
+                0,
+            )
+
+        clear.assert_called_once_with("event-clear")
+        self.assertFalse(MODULE.ACTIVE_ALERT_FILE.exists())
+
+    def test_old_desktop_input_does_not_clear_phone_alert(self):
+        baseline = 1_000_000_000
+        self.assertTrue(MODULE.save_active_alert("event-wait", baseline))
+        with patch.object(MODULE, "clear_event") as clear:
+            self.assertEqual(MODULE.clear_active_alert(baseline), 0)
+
+        clear.assert_not_called()
+        self.assertEqual(MODULE.load_active_alert()["event_id"], "event-wait")
+
+    def test_clear_response_cannot_remove_a_newer_completion(self):
+        baseline = 1_000_000_000
+        self.assertTrue(MODULE.save_active_alert("event-old", baseline))
+
+        def replace_with_newer(_event_id):
+            MODULE.ACTIVE_ALERT_FILE.write_text(
+                '{"event_id":"event-new","presence_baseline":2000000000,'
+                '"delivered_at":9999999999}\n',
+                encoding="utf-8",
+            )
+            return True, "lan-direct", "stale"
+
+        with patch.object(MODULE, "clear_event", side_effect=replace_with_newer):
+            self.assertEqual(
+                MODULE.clear_active_alert(baseline + MODULE.INPUT_STAMP_TOLERANCE_NS + 1),
+                0,
+            )
+
+        self.assertEqual(MODULE.load_active_alert()["event_id"], "event-new")
 
 if __name__ == "__main__":
     unittest.main()

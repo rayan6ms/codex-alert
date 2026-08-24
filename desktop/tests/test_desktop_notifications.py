@@ -43,6 +43,9 @@ class DesktopNotificationTests(unittest.TestCase):
         self.assertEqual((returncode, error, notification_id), (0, "", "42"))
         command = run.call_args.args[0]
         self.assertEqual(command[0], "/custom/bin/notify-send")
+        self.assertIn(f"--app-icon={MODULE.APP_ICON}", command)
+        self.assertIn(f"--icon={MODULE.APP_ICON}", command)
+        self.assertIn("--hint=string:desktop-entry:dev.rayan.codexalert", command)
         self.assertIn("Done &lt;now&gt;", command)
         self.assertIn("A &amp; B", command)
         self.assertEqual(MODULE.ID_FILE.read_text(encoding="ascii"), "42\n")
@@ -66,6 +69,7 @@ class DesktopNotificationTests(unittest.TestCase):
         fallback = run.call_args_list[1].args[0]
         self.assertNotIn("--print-id", fallback)
         self.assertFalse(any(argument.startswith("--replace-id=") for argument in fallback))
+        self.assertIn(f"--app-icon={MODULE.APP_ICON}", fallback)
 
     def test_sound_falls_back_to_paplay(self):
         sound = Path(self.temporary.name) / "complete.oga"

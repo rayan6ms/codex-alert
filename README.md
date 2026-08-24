@@ -46,6 +46,11 @@ After setup, the installation steps disappear. The app opens to a status
 dashboard that clearly shows whether the receiver, notifications, and secure
 computer pairing are working, along with the most recently received alert.
 
+On GNOME, a phone alert is also dismissed after the first new keyboard or
+pointer activity on the paired desktop following that completion. This uses
+GNOME's session idle timer: Codex Alert sees only an elapsed-time value, never
+the key pressed, button clicked, or pointer position.
+
 Pair while both devices are on the same trusted Wi-Fi network. The app guides
 you to battery settings only if your phone restricts background delivery.
 

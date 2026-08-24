@@ -200,6 +200,16 @@ public final class AlertServerService extends Service {
                 sendResponse(output, 200, "ok");
                 return;
             }
+            if ("POST".equals(request.method) && "/v1/clear".equals(request.path)) {
+                JSONObject payload = new JSONObject(new String(request.body, StandardCharsets.UTF_8));
+                String eventId = limited(payload.optString("id", ""), 128);
+                if (!eventId.matches("[A-Za-z0-9._:-]{1,128}")) {
+                    sendResponse(output, 400, "invalid-event-id");
+                    return;
+                }
+                sendResponse(output, 200, clearAlert(eventId));
+                return;
+            }
             if (!"POST".equals(request.method) || !"/v1/alert".equals(request.path)) {
                 sendResponse(output, 404, "not-found");
                 return;
@@ -317,6 +327,19 @@ public final class AlertServerService extends Service {
             startT3Watcher(eventId, AlertStore.activeSince(this));
         }
         return "ok";
+    }
+
+    private synchronized String clearAlert(String eventId) {
+        String activeEventId = AlertStore.activeEventId(this);
+        if (activeEventId.isEmpty()) {
+            return "already-clear";
+        }
+        if (!activeEventId.equals(eventId)) {
+            return "stale";
+        }
+        AlertNotifier.clearCompletion(this);
+        AlertStore.clearActive(this, eventId, "desktop-input");
+        return "cleared";
     }
 
     private void watchActiveAlert() {

@@ -25,9 +25,11 @@ for source in \
     codex-notify-stop \
     codex-notify-stop-desktop \
     codex-phone-deliver \
+    codex-phone-clear-on-input.service \
     codex-phone-delivery.service \
     codex_alert_common.py \
     dev.rayan.codexalert.svg \
+    dev.rayan.codexalert.desktop \
     dev.rayan.codexalert-watch.desktop \
     install.sh; do
     install -m 644 "${project_dir}/desktop/${source}" "${package_dir}/desktop/${source}"

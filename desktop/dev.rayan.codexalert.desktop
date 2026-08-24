@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Codex Alert
+Comment=Codex completion notifications
+Exec=/usr/bin/true
+Icon=dev.rayan.codexalert
+Terminal=false
+NoDisplay=true

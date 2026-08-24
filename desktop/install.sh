@@ -10,6 +10,7 @@ xdg_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
 systemd_dir="${xdg_config_home}/systemd/user"
 autostart_dir="${xdg_config_home}/autostart"
 icon_dir="${xdg_data_home}/icons/hicolor/scalable/apps"
+applications_dir="${xdg_data_home}/applications"
 
 missing=()
 for command in python3 notify-send install ln mktemp sed; do
@@ -35,7 +36,8 @@ install -d -m 700 \
     "${bin_dir}" \
     "${config_dir}" \
     "${HOME}/.local/state/codex-notify" \
-    "${icon_dir}"
+    "${icon_dir}" \
+    "${applications_dir}"
 
 for program in codex-alert codex-notify-stop codex-notify-stop-desktop codex-phone-deliver; do
     install -m 700 "${project_dir}/desktop/${program}" "${lib_dir}/${program}"
@@ -44,11 +46,15 @@ done
 install -m 600 "${project_dir}/desktop/codex_alert_common.py" "${lib_dir}/codex_alert_common.py"
 install -m 644 "${project_dir}/desktop/dev.rayan.codexalert.svg" \
     "${icon_dir}/dev.rayan.codexalert.svg"
+install -m 644 "${project_dir}/desktop/dev.rayan.codexalert.desktop" \
+    "${applications_dir}/dev.rayan.codexalert.desktop"
 
 if [[ "${systemd_user}" == true ]]; then
     install -d -m 700 "${systemd_dir}"
     install -m 600 "${project_dir}/desktop/codex-phone-delivery.service" \
         "${systemd_dir}/codex-phone-delivery.service"
+    install -m 600 "${project_dir}/desktop/codex-phone-clear-on-input.service" \
+        "${systemd_dir}/codex-phone-clear-on-input.service"
     install -m 600 "${project_dir}/desktop/codex-alert-hooks.service" \
         "${systemd_dir}/codex-alert-hooks.service"
     install -m 600 "${project_dir}/desktop/codex-alert-hooks.timer" \
