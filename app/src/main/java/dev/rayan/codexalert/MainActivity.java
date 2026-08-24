@@ -7,8 +7,10 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +29,20 @@ import java.util.Date;
 
 @SuppressLint("SetTextI18n")
 public final class MainActivity extends Activity {
+    private static final int INK = Color.rgb(16, 32, 29);
+    private static final int MUTED = Color.rgb(82, 100, 95);
+    private static final int TEAL = Color.rgb(8, 127, 112);
+    private static final int TEAL_DARK = Color.rgb(5, 98, 86);
+    private static final int TEAL_PALE = Color.rgb(221, 244, 239);
+    private static final int GREEN = Color.rgb(20, 125, 85);
+    private static final int GREEN_PALE = Color.rgb(224, 246, 235);
+    private static final int AMBER = Color.rgb(151, 91, 8);
+    private static final int AMBER_PALE = Color.rgb(255, 242, 211);
+    private static final int RED = Color.rgb(178, 48, 48);
+    private static final int RED_PALE = Color.rgb(255, 231, 231);
+    private static final int BACKGROUND = Color.rgb(244, 247, 246);
+    private static final int DIVIDER = Color.rgb(218, 226, 223);
+
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
     private final Runnable periodicRefresh = new Runnable() {
         @Override public void run() {
@@ -34,11 +50,17 @@ public final class MainActivity extends Activity {
             refreshHandler.postDelayed(this, 1000);
         }
     };
-    private TextView setupStatus;
+
+    private int setupStep;
+    private boolean dashboard;
+    private boolean lastNotifications;
+    private TextView pairingCard;
+    private TextView heroPill;
+    private TextView heroTitle;
+    private TextView heroDetail;
     private TextView receiverStatus;
-    private Button notificationPermissionButton;
-    private Button pairingButton;
-    private Button forgetButton;
+    private TextView lastAlert;
+    private Button nextButton;
     private Switch t3Switch;
     private Switch autoClearSwitch;
     private Button usageAccessButton;
@@ -48,7 +70,15 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         AlertNotifier.ensureChannels(this);
         AlertServerService.start(this);
-        setContentView(buildContent());
+        boolean paired = DeviceIdentity.isPaired(this);
+        boolean notifications = notificationsAllowed();
+        var ui = getSharedPreferences("ui", Context.MODE_PRIVATE);
+        dashboard = ui.getBoolean("setup_complete", false) || (paired && notifications);
+        if (dashboard) {
+            ui.edit().putBoolean("setup_complete", true).apply();
+        }
+        setupStep = notifications ? (paired ? 2 : 1) : 0;
+        render();
     }
 
     @Override
@@ -65,127 +95,287 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
-    private View buildContent() {
-        int pad = dp(24);
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(pad, dp(32), pad, dp(32));
-        content.setBackgroundColor(Color.rgb(245, 247, 248));
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == 100) {
+            refreshStatus();
+        }
+    }
 
-        TextView eyebrow = text("CODEX ALERT", 12, Color.rgb(13, 148, 136));
-        eyebrow.setTypeface(Typeface.DEFAULT_BOLD);
-        content.addView(eyebrow);
+    @SuppressWarnings("deprecation")
+    private void render() {
+        resetReferences();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout content = column();
+        int horizontalPadding = dp(22);
+        int topPadding = dp(28);
+        int bottomPadding = dp(36);
+        content.setPadding(horizontalPadding, topPadding, horizontalPadding, bottomPadding);
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            content.setPadding(
+                    horizontalPadding,
+                    topPadding + insets.getSystemWindowInsetTop(),
+                    horizontalPadding,
+                    bottomPadding + insets.getSystemWindowInsetBottom()
+            );
+            return insets;
+        });
+        content.setBackgroundColor(BACKGROUND);
+        addBrand(content);
+        if (dashboard) {
+            buildDashboard(content);
+        } else {
+            buildSetup(content);
+        }
+        scroll.addView(content);
+        setContentView(scroll);
+        lastNotifications = notificationsAllowed();
+        updateVisibleStatus();
+    }
 
-        TextView title = text("Know when Codex is done.", 28, Color.rgb(17, 24, 39));
+    private void resetReferences() {
+        pairingCard = null;
+        heroPill = null;
+        heroTitle = null;
+        heroDetail = null;
+        receiverStatus = null;
+        lastAlert = null;
+        nextButton = null;
+        t3Switch = null;
+        autoClearSwitch = null;
+        usageAccessButton = null;
+    }
+
+    private void addBrand(LinearLayout content) {
+        LinearLayout brand = new LinearLayout(this);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        TextView mark = text("✓", 18, Color.WHITE);
+        mark.setTypeface(Typeface.DEFAULT_BOLD);
+        mark.setGravity(Gravity.CENTER);
+        mark.setBackground(rounded(TEAL, 12));
+        brand.addView(mark, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        TextView name = text("Codex Alert", 17, INK);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams params = wrap();
+        params.setMargins(dp(11), 0, 0, 0);
+        brand.addView(name, params);
+        content.addView(brand);
+    }
+
+    private void buildSetup(LinearLayout content) {
+        TextView label = text("SETUP  ·  " + (setupStep + 1) + " OF 3", 12, TEAL);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        addTop(content, label, 30);
+        addProgress(content);
+        if (setupStep == 0) {
+            buildNotificationStep(content);
+        } else if (setupStep == 1) {
+            buildPairingStep(content);
+        } else {
+            buildFinishStep(content);
+        }
+        addSetupNavigation(content);
+    }
+
+    private void addProgress(LinearLayout content) {
+        LinearLayout row = new LinearLayout(this);
+        for (int index = 0; index < 3; index++) {
+            View segment = new View(this);
+            segment.setBackground(rounded(index <= setupStep ? TEAL : DIVIDER, 3));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(5), 1);
+            if (index > 0) params.setMargins(dp(6), 0, 0, 0);
+            row.addView(segment, params);
+        }
+        addTop(content, row, 10);
+    }
+
+    private void buildNotificationStep(LinearLayout content) {
+        addPageHeading(content, "Let alerts reach you",
+                "Allow completion notifications so you know immediately when Codex has finished.");
+        LinearLayout card = card(Color.WHITE);
+        card.addView(iconCircle("1", TEAL_PALE, TEAL));
+        TextView title = text("Notifications", 18, INK);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, dp(8), 0, dp(8));
-        content.addView(title);
-        content.addView(text(
-                "Private completion alerts over your LAN or Tailscale—without a cloud relay.",
-                16,
-                Color.rgb(75, 85, 99)
-        ));
+        addTop(card, title, 16);
+        boolean allowed = notificationsAllowed();
+        card.addView(text(allowed
+                ? "Allowed. Codex Alert can show completion alerts."
+                : "Android is currently blocking completion alerts.", 15, allowed ? GREEN : MUTED));
+        addTop(card, primaryButton(allowed ? "Notification settings" : "Allow notifications",
+                view -> requestNotificationPermission()), 20);
+        addTop(content, card, 26);
+        addTop(content, text(
+                "Only the alert title and task summary appear. Codex Alert has no cloud relay.",
+                13, MUTED), 18);
+    }
 
-        content.addView(sectionTitle("1 · Allow notifications"));
-        content.addView(text(
-                "Android needs this permission before Codex Alert can show completions.",
-                14,
-                Color.rgb(75, 85, 99)
-        ));
-        notificationPermissionButton = button(
-                "Allow notifications",
-                view -> requestNotificationPermission()
-        );
-        addWithTopMargin(content, notificationPermissionButton);
+    private void buildPairingStep(LinearLayout content) {
+        addPageHeading(content, "Connect this phone",
+                "Pair once with your computer over the same trusted Wi-Fi or Tailscale network.");
+        LinearLayout pairing = card(Color.WHITE);
+        pairingCard = text("", 15, MUTED);
+        pairing.addView(pairingCard);
+        if (!DeviceIdentity.isPaired(this)) {
+            boolean active = DeviceIdentity.pairingActive(this);
+            addTop(pairing, primaryButton(active ? "Create a new code" : "Create pairing code",
+                    view -> beginPairing()), 20);
+        }
+        addTop(content, pairing, 26);
 
-        content.addView(sectionTitle("2 · Pair this phone"));
-        content.addView(text(
-                "Keep the phone and computer on the same trusted network. Then create a code here and run codex-alert pair on the computer.",
-                14,
-                Color.rgb(75, 85, 99)
-        ));
-        setupStatus = statusCard("Preparing secure receiver…");
-        addWithTopMargin(content, setupStatus);
-        pairingButton = button("Create 8-digit pairing code", view -> beginPairing());
-        addWithTopMargin(content, pairingButton);
-        forgetButton = button("Forget paired computer", view -> confirmForget());
-        addWithTopMargin(content, forgetButton);
+        LinearLayout command = card(Color.rgb(236, 241, 239));
+        TextView commandLabel = text("ON YOUR COMPUTER", 11, MUTED);
+        commandLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        command.addView(commandLabel);
+        TextView commandText = text("codex-alert pair", 17, INK);
+        commandText.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        addTop(command, commandText, 8);
+        command.addView(text(
+                "Enter the code above, then confirm that both security codes match.", 14, MUTED));
+        addTop(content, command, 12);
+    }
 
-        content.addView(sectionTitle("3 · Check delivery"));
-        receiverStatus = statusCard("Starting receiver…");
+    private void buildFinishStep(LinearLayout content) {
+        addPageHeading(content, "You’re ready",
+                "This phone is securely paired and listening for Codex completions.");
+        LinearLayout success = card(GREEN_PALE);
+        success.addView(iconCircle("✓", Color.WHITE, GREEN));
+        TextView title = text("Everything is working", 21, GREEN);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        addTop(success, title, 16);
+        success.addView(text("Receiver active · Notifications allowed · Computer paired", 14, INK));
+        addTop(content, success, 26);
+        addTop(content, secondaryButton("Send a test alert on this phone", view -> sendLocalTest()), 14);
+        content.addView(text("You can change optional behavior later from the app dashboard.", 13, MUTED));
+    }
+
+    private void addSetupNavigation(LinearLayout content) {
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setGravity(Gravity.CENTER_VERTICAL);
+        if (setupStep > 0) {
+            Button back = quietButton("Back", view -> {
+                setupStep--;
+                render();
+            });
+            navigation.addView(back, new LinearLayout.LayoutParams(0, dp(52), 1));
+        } else {
+            navigation.addView(new View(this), new LinearLayout.LayoutParams(0, dp(52), 1));
+        }
+        nextButton = primaryButton(setupStep == 2 ? "Finish setup" : "Continue", view -> {
+            if (setupStep == 2) {
+                getSharedPreferences("ui", Context.MODE_PRIVATE).edit()
+                        .putBoolean("setup_complete", true).apply();
+                dashboard = true;
+            } else {
+                setupStep++;
+            }
+            render();
+        });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(52), 1.45f);
+        params.setMargins(dp(10), 0, 0, 0);
+        navigation.addView(nextButton, params);
+        addTop(content, navigation, 30);
+    }
+
+    private void buildDashboard(LinearLayout content) {
+        LinearLayout hero = card(Color.WHITE);
+        heroPill = pill("CHECKING", AMBER_PALE, AMBER);
+        hero.addView(heroPill);
+        heroTitle = text("Checking your receiver…", 26, INK);
+        heroTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        addTop(hero, heroTitle, 18);
+        heroDetail = text("Confirming notification, pairing, and network status.", 15, MUTED);
+        hero.addView(heroDetail);
+        addTop(content, hero, 30);
+
+        addTop(content, sectionTitle("Status"), 28);
+        receiverStatus = text("", 15, INK);
+        receiverStatus.setPadding(dp(18), dp(17), dp(18), dp(17));
+        receiverStatus.setBackground(rounded(Color.WHITE, 16));
         content.addView(receiverStatus);
-        addWithTopMargin(content, button("Send on-device test alert", view -> {
-            Intent intent = new Intent(this, AlertServerService.class)
-                    .setAction(AlertServerService.ACTION_TEST);
-            startForegroundService(intent);
-        }));
-        addWithTopMargin(content, button("Notification settings", view -> {
-            Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
-            startActivity(intent);
-        }));
-        addWithTopMargin(content, button("Battery/background settings", view ->
-                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        ));
+        lastAlert = text("", 14, MUTED);
+        lastAlert.setPadding(dp(18), dp(17), dp(18), dp(17));
+        lastAlert.setBackground(rounded(Color.WHITE, 16));
+        addTop(content, lastAlert, 10);
 
-        content.addView(sectionTitle("Optional · T3 Code"));
+        LinearLayout actions = new LinearLayout(this);
+        actions.addView(primaryButton("Send test alert", view -> sendLocalTest()),
+                new LinearLayout.LayoutParams(0, dp(52), 1));
+        Button notificationSettings = secondaryButton("Notifications", view -> openNotificationSettings());
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(0, dp(52), 1);
+        settingsParams.setMargins(dp(10), 0, 0, 0);
+        actions.addView(notificationSettings, settingsParams);
+        addTop(content, actions, 12);
+        if (!notificationsAllowed()) {
+            addTop(content, primaryButton("Allow completion notifications",
+                    view -> requestNotificationPermission()), 10);
+        }
+
+        addTop(content, sectionTitle("Optional · T3 Code"), 30);
         content.addView(text(
-                "Off by default. Enable it only if you want notification taps to open the exact T3 Code thread.",
-                14,
-                Color.rgb(75, 85, 99)
-        ));
+                "Open the exact T3 Code thread when you tap an alert. This stays off unless you enable it.",
+                14, MUTED));
+        LinearLayout preferences = card(Color.WHITE);
         t3Switch = toggle("Open exact T3 Code thread", T3Integration.enabled(this), checked -> {
             T3Integration.setEnabled(this, checked);
-            if (!checked) {
+            if (!checked && autoClearSwitch != null) {
                 autoClearSwitch.setChecked(false);
                 T3Integration.setAutoClearEnabled(this, false);
             }
-            refreshStatus();
+            updateT3Controls();
         });
-        addWithTopMargin(content, t3Switch);
-        autoClearSwitch = toggle(
-                "Auto-clear when T3 Code opens",
-                T3Integration.autoClearEnabled(this),
-                checked -> {
+        preferences.addView(t3Switch);
+        View line = new View(this);
+        line.setBackgroundColor(DIVIDER);
+        LinearLayout.LayoutParams lineParams = match(dp(1));
+        lineParams.setMargins(0, dp(14), 0, dp(14));
+        preferences.addView(line, lineParams);
+        autoClearSwitch = toggle("Clear alert when T3 Code opens",
+                T3Integration.autoClearEnabled(this), checked -> {
                     T3Integration.setAutoClearEnabled(this, checked);
-                    refreshStatus();
-                }
-        );
-        addWithTopMargin(content, autoClearSwitch);
-        usageAccessButton = button("Grant T3 auto-clear access", view -> {
-            try {
-                startActivity(T3Integration.usageAccessSettings(this));
-            } catch (RuntimeException exception) {
-                startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
-            }
-        });
-        addWithTopMargin(content, usageAccessButton);
+                    updateT3Controls();
+                });
+        preferences.addView(autoClearSwitch);
+        usageAccessButton = secondaryButton("Grant auto-clear access", view -> openUsageAccess());
+        addTop(preferences, usageAccessButton, 14);
+        addTop(content, preferences, 12);
 
+        addTop(content, sectionTitle("Device & security"), 30);
+        LinearLayout security = card(Color.WHITE);
+        TextView securityLabel = text("SECURITY CODE", 11, MUTED);
+        securityLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        security.addView(securityLabel);
+        TextView code = text(DeviceIdentity.securityCode(this), 16, INK);
+        code.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        addTop(security, code, 6);
+        addTop(security, quietButton("Battery & background settings", view ->
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))), 16);
+        addTop(security, destructiveButton("Forget paired computer", view -> confirmForget()), 6);
+        addTop(content, security, 12);
         TextView privacy = text(
-                "Pairing codes expire after 10 minutes and five failed attempts. Each phone generates its own TLS key and delivery token; private keys never leave the device.",
-                12,
-                Color.rgb(107, 114, 128)
-        );
-        privacy.setPadding(0, dp(28), 0, 0);
+                "Private LAN/Tailscale delivery · No cloud relay · Keys stay on this device",
+                12, MUTED);
         privacy.setGravity(Gravity.CENTER_HORIZONTAL);
-        content.addView(privacy);
+        addTop(content, privacy, 24);
+    }
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(content);
-        return scroll;
+    private void addPageHeading(LinearLayout content, String title, String detail) {
+        TextView heading = text(title, 29, INK);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        addTop(content, heading, 24);
+        content.addView(text(detail, 16, MUTED));
     }
 
     private void beginPairing() {
         try {
-            String code = DeviceIdentity.beginPairing(this);
-            setupStatus.setText(
-                    "Pairing code\n" + code.substring(0, 4) + " " + code.substring(4)
-                            + "\n\nSecurity code\n" + DeviceIdentity.securityCode(this)
-                            + "\n\nExpires in 10 minutes."
-            );
+            DeviceIdentity.beginPairing(this);
             AlertServerService.start(this);
+            render();
         } catch (Exception exception) {
-            setupStatus.setText("Could not create a device key.\n" + exception.getClass().getSimpleName());
+            pairingCard.setText("Could not create a secure device key.\n"
+                    + exception.getClass().getSimpleName());
+            pairingCard.setTextColor(RED);
         }
     }
 
@@ -197,7 +387,11 @@ public final class MainActivity extends Activity {
                 .setPositiveButton("Forget", (dialog, which) -> {
                     DeviceIdentity.forgetDesktop(this);
                     AlertNotifier.clearCompletion(this);
-                    refreshStatus();
+                    getSharedPreferences("ui", Context.MODE_PRIVATE).edit()
+                            .putBoolean("setup_complete", false).apply();
+                    dashboard = false;
+                    setupStep = notificationsAllowed() ? 1 : 0;
+                    render();
                 })
                 .show();
     }
@@ -208,78 +402,241 @@ public final class MainActivity extends Activity {
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
         } else {
-            startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+            openNotificationSettings();
         }
+    }
+
+    private void openNotificationSettings() {
+        startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+    }
+
+    private void openUsageAccess() {
+        try {
+            startActivity(T3Integration.usageAccessSettings(this));
+        } catch (RuntimeException exception) {
+            startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
+        }
+    }
+
+    private void sendLocalTest() {
+        Intent intent = new Intent(this, AlertServerService.class)
+                .setAction(AlertServerService.ACTION_TEST);
+        startForegroundService(intent);
     }
 
     private void refreshStatus() {
-        if (setupStatus == null || receiverStatus == null) {
+        boolean paired = DeviceIdentity.isPaired(this);
+        boolean notifications = notificationsAllowed();
+        if (dashboard && !paired) {
+            dashboard = false;
+            setupStep = notifications ? 1 : 0;
+            getSharedPreferences("ui", Context.MODE_PRIVATE).edit()
+                    .putBoolean("setup_complete", false).apply();
+            render();
             return;
         }
+        if (!dashboard) {
+            if (setupStep == 0 && notifications) {
+                setupStep = paired ? 2 : 1;
+                render();
+                return;
+            }
+            if (setupStep == 1 && paired) {
+                setupStep = 2;
+                render();
+                return;
+            }
+            if (setupStep == 2 && !paired) {
+                setupStep = 1;
+                render();
+                return;
+            }
+        } else if (notifications != lastNotifications) {
+            render();
+            return;
+        }
+        lastNotifications = notifications;
+        updateVisibleStatus();
+    }
+
+    private void updateVisibleStatus() {
         boolean paired = DeviceIdentity.isPaired(this);
-        pairingButton.setVisibility(paired ? View.GONE : View.VISIBLE);
-        forgetButton.setVisibility(paired ? View.VISIBLE : View.GONE);
+        boolean notifications = notificationsAllowed();
+        var status = getSharedPreferences("status", Context.MODE_PRIVATE);
+        String serverState = status.getString("server_state", "starting");
+        if (nextButton != null) {
+            boolean enabled = setupStep == 0 ? notifications
+                    : setupStep == 1 ? paired : paired && notifications;
+            nextButton.setEnabled(enabled);
+            nextButton.setAlpha(enabled ? 1f : 0.45f);
+        }
+        if (pairingCard != null) updatePairingCard(paired);
+        if (heroTitle != null) {
+            boolean ready = paired && notifications && "running".equals(serverState);
+            if (ready) {
+                stylePill(heroPill, "●  READY", GREEN_PALE, GREEN);
+                heroTitle.setText("Codex Alert is working");
+                heroDetail.setText("Your phone is connected and ready for completion alerts.");
+            } else if (!notifications) {
+                stylePill(heroPill, "ACTION NEEDED", AMBER_PALE, AMBER);
+                heroTitle.setText("Notifications are blocked");
+                heroDetail.setText("Allow notifications to receive Codex completions on this phone.");
+            } else if ("error".equals(serverState)) {
+                stylePill(heroPill, "RETRYING", RED_PALE, RED);
+                heroTitle.setText("Receiver needs attention");
+                heroDetail.setText("Codex Alert is retrying automatically. Check your network settings.");
+            } else {
+                stylePill(heroPill, "STARTING", AMBER_PALE, AMBER);
+                heroTitle.setText("Starting the receiver…");
+                heroDetail.setText("This normally takes only a moment.");
+            }
+        }
+        if (receiverStatus != null) {
+            String serverLine = "running".equals(serverState) ? "✓  Receiver active"
+                    : "error".equals(serverState) ? "!  Receiver retrying" : "…  Receiver starting";
+            receiverStatus.setText(serverLine
+                    + "\n" + (notifications ? "✓  Notifications allowed" : "!  Notifications blocked")
+                    + "\n" + (paired ? "✓  Computer paired securely" : "!  Computer not paired")
+                    + "\n\nNetwork  ·  " + AlertServerService.networkSummary().replace("\n", "  ·  "));
+            receiverStatus.setTextColor(
+                    paired && notifications && "running".equals(serverState) ? INK : AMBER);
+        }
+        if (lastAlert != null) {
+            long lastTime = status.getLong("last_time", 0);
+            lastAlert.setText(lastTime == 0 ? "LAST ALERT\nNo completion received yet"
+                    : "LAST ALERT  ·  " + DateFormat.getTimeFormat(this).format(new Date(lastTime))
+                    + "\n" + status.getString("last_title", "Codex finished")
+                    + "\n" + status.getString("last_body", "Task completed."));
+        }
+        updateT3Controls();
+    }
+
+    private void updatePairingCard(boolean paired) {
         if (paired) {
-            setupStatus.setText("Paired securely\nSecurity code · " + DeviceIdentity.securityCode(this));
-        } else if (!DeviceIdentity.pairingActive(this)) {
-            setupStatus.setText("Not paired yet\n" + AlertServerService.networkSummary());
+            pairingCard.setText("✓  Paired securely\n\nSECURITY CODE\n"
+                    + DeviceIdentity.securityCode(this));
+            pairingCard.setTextColor(GREEN);
+            pairingCard.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            return;
         }
-
-        boolean notifications = AlertNotifier.completionNotificationsEnabled(this);
-        notificationPermissionButton.setVisibility(notifications ? View.GONE : View.VISIBLE);
-        boolean runtimePermissionMissing = Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED;
-        notificationPermissionButton.setText(
-                runtimePermissionMissing ? "Allow notifications" : "Open notification settings"
-        );
-        var prefs = getSharedPreferences("status", Context.MODE_PRIVATE);
-        String activeEventId = prefs.getString("active_event_id", "");
-        StringBuilder value = new StringBuilder()
-                .append("Receiver · ").append(prefs.getString("server_state", "starting"))
-                .append("\nNotifications · ").append(notifications ? "allowed" : "permission needed")
-                .append("\nNetwork · ").append(AlertServerService.networkSummary())
-                .append("\nCompletion · ").append(activeEventId.isEmpty() ? "clear" : "visible");
-        long lastTime = prefs.getLong("last_time", 0);
-        if (lastTime > 0) {
-            value.append("\n\nLast received · ")
-                    .append(DateFormat.getTimeFormat(this).format(new Date(lastTime)))
-                    .append("\n").append(prefs.getString("last_title", "Codex finished"))
-                    .append("\n").append(prefs.getString("last_body", "Task completed."));
+        String code = DeviceIdentity.currentPairingCode(this);
+        if (!code.isEmpty()) {
+            pairingCard.setText("PAIRING CODE\n" + code.substring(0, 4) + "  " + code.substring(4)
+                    + "\n\nSECURITY CODE\n" + DeviceIdentity.securityCode(this)
+                    + "\n\nExpires after 10 minutes. Keep this screen open while pairing.");
+            pairingCard.setTextColor(INK);
+            pairingCard.setTextSize(18);
+            pairingCard.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        } else {
+            pairingCard.setText("Not paired yet\n\nCreate a one-time code, then enter it on your computer."
+                    + "\n\nNetwork\n" + AlertServerService.networkSummary());
+            pairingCard.setTextColor(MUTED);
+            pairingCard.setTextSize(15);
+            pairingCard.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
         }
-        receiverStatus.setText(value);
+    }
 
+    private void updateT3Controls() {
+        if (t3Switch == null || autoClearSwitch == null || usageAccessButton == null) return;
         boolean t3 = T3Integration.enabled(this);
         autoClearSwitch.setEnabled(t3);
-        usageAccessButton.setVisibility(
-                t3 && autoClearSwitch.isChecked() ? View.VISIBLE : View.GONE
-        );
-        if (autoClearSwitch.isChecked() && T3Integration.hasUsageAccess(this)) {
-            usageAccessButton.setText("T3 auto-clear access granted");
-        } else {
-            usageAccessButton.setText("Grant T3 auto-clear access");
-        }
+        autoClearSwitch.setAlpha(t3 ? 1f : 0.45f);
+        boolean showUsage = t3 && autoClearSwitch.isChecked();
+        usageAccessButton.setVisibility(showUsage ? View.VISIBLE : View.GONE);
+        usageAccessButton.setText(showUsage && T3Integration.hasUsageAccess(this)
+                ? "Auto-clear access granted" : "Grant auto-clear access");
+    }
+
+    private boolean notificationsAllowed() {
+        return AlertNotifier.completionNotificationsEnabled(this);
     }
 
     private TextView sectionTitle(String value) {
-        TextView title = text(value, 18, Color.rgb(17, 24, 39));
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, dp(28), 0, dp(6));
-        return title;
-    }
-
-    private TextView statusCard(String value) {
-        TextView view = text(value, 15, Color.rgb(31, 41, 55));
-        view.setPadding(dp(16), dp(16), dp(16), dp(16));
-        view.setBackgroundColor(Color.WHITE);
+        TextView view = text(value, 18, INK);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setPadding(0, 0, 0, dp(10));
         return view;
     }
 
-    private Button button(String label, View.OnClickListener listener) {
+    private LinearLayout column() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        return layout;
+    }
+
+    private LinearLayout card(int color) {
+        LinearLayout layout = column();
+        layout.setPadding(dp(18), dp(18), dp(18), dp(18));
+        layout.setBackground(rounded(color, 18));
+        layout.setElevation(dp(1));
+        return layout;
+    }
+
+    private TextView iconCircle(String value, int background, int foreground) {
+        TextView icon = text(value, 19, foreground);
+        icon.setTypeface(Typeface.DEFAULT_BOLD);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(background, 22));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
+        return icon;
+    }
+
+    private TextView pill(String value, int background, int foreground) {
+        TextView view = text(value, 11, foreground);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(11), dp(6), dp(11), dp(6));
+        view.setBackground(rounded(background, 20));
+        view.setLayoutParams(wrap());
+        return view;
+    }
+
+    private void stylePill(TextView view, String value, int background, int foreground) {
+        view.setText(value);
+        view.setTextColor(foreground);
+        view.setBackground(rounded(background, 20));
+    }
+
+    private Button primaryButton(String label, View.OnClickListener listener) {
+        Button button = baseButton(label, listener);
+        button.setTextColor(Color.WHITE);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackgroundTintList(interactionColors(TEAL, TEAL_DARK));
+        return button;
+    }
+
+    private Button secondaryButton(String label, View.OnClickListener listener) {
+        Button button = baseButton(label, listener);
+        button.setTextColor(TEAL_DARK);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackgroundTintList(interactionColors(Color.WHITE, TEAL_PALE));
+        return button;
+    }
+
+    private Button quietButton(String label, View.OnClickListener listener) {
+        Button button = baseButton(label, listener);
+        button.setTextColor(MUTED);
+        button.setBackgroundTintList(interactionColors(Color.TRANSPARENT, TEAL_PALE));
+        return button;
+    }
+
+    private Button destructiveButton(String label, View.OnClickListener listener) {
+        Button button = baseButton(label, listener);
+        button.setTextColor(RED);
+        button.setBackgroundTintList(interactionColors(RED_PALE, Color.rgb(250, 211, 211)));
+        return button;
+    }
+
+    private Button baseButton(String label, View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(label);
+        button.setTextSize(14);
         button.setAllCaps(false);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(52));
+        button.setPadding(dp(14), 0, dp(14), 0);
+        button.setStateListAnimator(null);
         button.setOnClickListener(listener);
         return button;
     }
@@ -288,18 +645,13 @@ public final class MainActivity extends Activity {
     private Switch toggle(String label, boolean initial, ToggleListener listener) {
         Switch toggle = new Switch(this);
         toggle.setText(label);
+        toggle.setTextSize(15);
+        toggle.setTextColor(INK);
+        toggle.setGravity(Gravity.CENTER_VERTICAL);
         toggle.setChecked(initial);
+        toggle.setShowText(false);
         toggle.setOnCheckedChangeListener((button, checked) -> listener.changed(checked));
         return toggle;
-    }
-
-    private void addWithTopMargin(LinearLayout content, View view) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        params.setMargins(0, dp(8), 0, 0);
-        content.addView(view, params);
     }
 
     private TextView text(String value, int sp, int color) {
@@ -307,8 +659,36 @@ public final class MainActivity extends Activity {
         view.setText(value);
         view.setTextSize(sp);
         view.setTextColor(color);
-        view.setLineSpacing(0, 1.12f);
+        view.setLineSpacing(0, 1.15f);
         return view;
+    }
+
+    private GradientDrawable rounded(int color, int radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        return drawable;
+    }
+
+    private ColorStateList interactionColors(int normal, int pressed) {
+        return new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_pressed}, new int[]{}},
+                new int[]{pressed, normal});
+    }
+
+    private void addTop(LinearLayout parent, View view, int marginDp) {
+        LinearLayout.LayoutParams params = match(LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(marginDp), 0, 0);
+        parent.addView(view, params);
+    }
+
+    private LinearLayout.LayoutParams match(int height) {
+        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, height);
+    }
+
+    private LinearLayout.LayoutParams wrap() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
     private int dp(int value) {

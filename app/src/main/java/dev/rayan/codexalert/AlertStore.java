@@ -119,6 +119,22 @@ final class AlertStore {
                 .apply();
     }
 
+    static void pairingError(Context context, String error) {
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putString("last_pairing_error", error)
+                .putLong("last_pairing_error_time", System.currentTimeMillis())
+                .apply();
+    }
+
+    static void pairingSucceeded(Context context) {
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .remove("last_pairing_error")
+                .putLong("last_pairing_time", System.currentTimeMillis())
+                .apply();
+    }
+
     static void usageWatchState(Context context, String state) {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
                 .edit()

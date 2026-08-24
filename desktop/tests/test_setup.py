@@ -1,10 +1,11 @@
 import importlib.machinery
+import http.client
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).parents[1] / "codex-alert"
 sys.path.insert(0, str(SCRIPT.parent))
@@ -15,7 +16,91 @@ import codex_alert_common as common
 MODULE = importlib.machinery.SourceFileLoader("codex_alert_cli", str(SCRIPT)).load_module()
 
 
+class FakePairingResponse:
+    status = 200
+
+    def read(self, maximum):
+        return json.dumps({
+            "status": "paired",
+            "token": "a" * 64,
+            "device_name": "Test phone",
+            "addresses": ["192.168.0.2"],
+        }).encode("utf-8")
+
+
+class FakePairingConnection:
+    def __init__(self, certificate, result):
+        self.certificate = certificate
+        self.result = result
+        self.sock = self
+        self.closed = False
+        self.requests = []
+
+    def connect(self):
+        pass
+
+    def getpeercert(self, binary_form=False):
+        return self.certificate
+
+    def request(self, *args, **kwargs):
+        self.requests.append((args, kwargs))
+
+    def getresponse(self):
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+    def close(self):
+        self.closed = True
+
+
 class HookSetupTests(unittest.TestCase):
+    def test_pairing_retries_a_dropped_success_response_safely(self):
+        first = FakePairingConnection(
+            b"same-certificate",
+            http.client.RemoteDisconnected("closed before response"),
+        )
+        second = FakePairingConnection(b"same-certificate", FakePairingResponse())
+        confirm = Mock(return_value=True)
+        with (
+            patch.object(MODULE.http.client, "HTTPSConnection", side_effect=[first, second]),
+            patch.object(MODULE.time, "sleep") as sleep,
+        ):
+            result, certificate = MODULE.pair_request("192.168.0.2", "12345678", confirm)
+
+        self.assertEqual(result["status"], "paired")
+        self.assertEqual(certificate, b"same-certificate")
+        confirm.assert_called_once_with(b"same-certificate")
+        sleep.assert_called_once_with(0.25)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_pairing_retry_rejects_a_changed_phone_identity(self):
+        first = FakePairingConnection(
+            b"first-certificate",
+            http.client.RemoteDisconnected("closed before response"),
+        )
+        second = FakePairingConnection(b"different-certificate", FakePairingResponse())
+        confirm = Mock(return_value=True)
+        with (
+            patch.object(MODULE.http.client, "HTTPSConnection", side_effect=[first, second]),
+            patch.object(MODULE.time, "sleep"),
+            self.assertRaisesRegex(RuntimeError, "phone identity changed"),
+        ):
+            MODULE.pair_request("192.168.0.2", "12345678", confirm)
+
+        confirm.assert_called_once_with(b"first-certificate")
+
+    def test_pairing_confirmation_is_authenticated_and_certificate_pinned(self):
+        connection = FakePairingConnection(b"phone-certificate", FakePairingResponse())
+        with patch.object(MODULE.http.client, "HTTPSConnection", return_value=connection):
+            MODULE.confirm_pairing("192.168.0.2", "b" * 64, b"phone-certificate")
+
+        args, kwargs = connection.requests[0]
+        self.assertEqual(args[:2], ("POST", "/v1/pair/confirm"))
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer " + "b" * 64)
+        self.assertTrue(connection.closed)
+
     def test_decodes_avahi_service_name_escapes_as_utf8(self):
         self.assertEqual(
             MODULE.decode_avahi_field(

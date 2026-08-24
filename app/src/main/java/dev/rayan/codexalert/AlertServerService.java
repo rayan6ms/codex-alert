@@ -12,6 +12,7 @@ import android.os.IBinder;
 import android.util.Log;
 
 import org.json.JSONException;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -183,6 +184,18 @@ public final class AlertServerService extends Service {
                 sendResponse(output, 401, "unauthorized");
                 return;
             }
+            // An authenticated second request proves that the desktop received the
+            // token. This also keeps compatibility with older desktop companions,
+            // whose automatic test alert serves as the confirmation request.
+            if (!DeviceIdentity.isPaired(this)) {
+                DeviceIdentity.completePairing(this);
+                AlertStore.pairingSucceeded(this);
+                showForeground(AlertNotifier.ready(this, readyDetail()));
+            }
+            if ("POST".equals(request.method) && "/v1/pair/confirm".equals(request.path)) {
+                sendResponse(output, 200, "paired");
+                return;
+            }
             if ("GET".equals(request.method) && "/v1/health".equals(request.path)) {
                 sendResponse(output, 200, "ok");
                 return;
@@ -231,7 +244,19 @@ public final class AlertServerService extends Service {
     private void pairDesktop(HttpRequest request, OutputStream output) throws IOException {
         try {
             JSONObject payload = new JSONObject(new String(request.body, StandardCharsets.UTF_8));
-            String result = DeviceIdentity.acceptPairingCode(this, payload.optString("code", ""));
+            String code = payload.optString("code", "");
+
+            // Prepare a stable response without completing the pairing. The code
+            // remains retryable until an authenticated follow-up proves that the
+            // desktop received these credentials.
+            String token = DeviceIdentity.deliveryToken(this);
+            String deviceName = DeviceIdentity.deviceName();
+            JSONArray addresses = new JSONArray();
+            for (String address : networkAddresses()) {
+                addresses.put(address);
+            }
+
+            String result = DeviceIdentity.acceptPairingCode(this, code);
             if (!"paired".equals(result)) {
                 JSONObject error = new JSONObject()
                         .put("status", result)
@@ -241,13 +266,18 @@ public final class AlertServerService extends Service {
             }
             JSONObject response = new JSONObject()
                     .put("status", "paired")
-                    .put("token", DeviceIdentity.deliveryToken(this))
-                    .put("device_name", DeviceIdentity.deviceName())
-                    .put("addresses", new org.json.JSONArray(networkAddresses()));
+                    .put("token", token)
+                    .put("device_name", deviceName)
+                    .put("addresses", addresses);
             sendJsonResponse(output, 200, response);
-            showForeground(AlertNotifier.ready(this, readyDetail()));
         } catch (JSONException exception) {
+            AlertStore.pairingError(this, "invalid-request");
             sendResponse(output, 400, "invalid-request");
+        } catch (RuntimeException exception) {
+            String error = cleanError(exception);
+            AlertStore.pairingError(this, error);
+            Log.e(LOG_TAG, "Could not complete pairing · " + error, exception);
+            sendResponse(output, 500, "pairing-failed");
         }
     }
 
@@ -449,7 +479,8 @@ public final class AlertServerService extends Service {
     private void sendJsonResponse(OutputStream output, int status, JSONObject payload) throws IOException {
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
         String reason = status == 200 ? "OK" : status == 401 ? "Unauthorized" :
-                status == 404 ? "Not Found" : status == 503 ? "Service Unavailable" : "Bad Request";
+                status == 404 ? "Not Found" : status == 500 ? "Internal Server Error" :
+                status == 503 ? "Service Unavailable" : "Bad Request";
         String headers = "HTTP/1.1 " + status + " " + reason + "\r\n"
                 + "Content-Type: application/json\r\n"
                 + "Content-Length: " + body.length + "\r\n"

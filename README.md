@@ -36,9 +36,14 @@ codex-alert test
 
 1. Install [Codex Alert for Android](https://github.com/rayan6ms/codex-alert/releases/latest/download/codex-alert.apk)
    and open it. Android may ask you to allow installs from your browser.
-2. Allow notifications, then tap **Create 8-digit pairing code**.
-3. On the computer, run `codex-alert pair`. Enter the code and confirm that the
-   security code shown on both devices is identical.
+2. Follow the app's three-screen setup: allow notifications, create a pairing
+   code, and finish the connection check.
+3. When prompted, run `codex-alert pair` on the computer. Enter the code and
+   confirm that the security code shown on both devices is identical.
+
+After setup, the installation steps disappear. The app opens to a status
+dashboard that clearly shows whether the receiver, notifications, and secure
+computer pairing are working, along with the most recently received alert.
 
 Pair while both devices are on the same trusted Wi-Fi network. The app guides
 you to battery settings only if your phone restricts background delivery.

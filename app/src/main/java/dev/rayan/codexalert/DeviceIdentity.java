@@ -117,19 +117,35 @@ final class DeviceIdentity {
             preferences.edit().putInt("pairing_attempts", attempts + 1).apply();
             return "invalid-code";
         }
+        // Do not mark the phone paired yet. The desktop must prove it received the
+        // credentials with an authenticated follow-up request. Until then the same
+        // code remains safely retryable after a dropped HTTP response.
+        return "paired";
+    }
+
+    static synchronized void completePairing(Context context) {
+        var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         preferences.edit()
                 .putBoolean("paired", true)
+                .putLong("paired_at", System.currentTimeMillis())
                 .remove("pairing_code")
                 .remove("pairing_expires_at")
                 .remove("pairing_attempts")
                 .apply();
-        return "paired";
     }
 
     static boolean pairingActive(Context context) {
         var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         return !preferences.getString("pairing_code", "").isEmpty()
                 && System.currentTimeMillis() <= preferences.getLong("pairing_expires_at", 0);
+    }
+
+    static String currentPairingCode(Context context) {
+        if (!pairingActive(context)) {
+            return "";
+        }
+        return context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .getString("pairing_code", "");
     }
 
     static boolean isPaired(Context context) {

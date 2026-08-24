@@ -5,6 +5,7 @@
 import argparse
 import fcntl
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -250,34 +251,109 @@ def choose_phone(explicit_host=None):
 def pair_request(host, code, confirm_certificate):
     context = ssl._create_unverified_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    connection = http.client.HTTPSConnection(host, PORT, timeout=8, context=context)
     payload = json.dumps({"code": code}, separators=(",", ":")).encode("utf-8")
-    try:
-        connection.connect()
-        certificate = connection.sock.getpeercert(binary_form=True)
-        if not confirm_certificate(certificate):
-            raise RuntimeError("pairing cancelled; security codes did not match")
-        connection.request(
-            "POST",
-            "/v1/pair",
-            body=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Content-Length": str(len(payload)),
-                "Connection": "close",
-            },
-        )
-        response = connection.getresponse()
-        body = response.read(8192).decode("utf-8", errors="replace")
+    certificate = None
+    last_error = None
+    transient_errors = (
+        http.client.RemoteDisconnected,
+        ConnectionResetError,
+        BrokenPipeError,
+        ssl.SSLError,
+        socket.timeout,
+    )
+    for attempt in range(3):
+        connection = http.client.HTTPSConnection(host, PORT, timeout=8, context=context)
         try:
-            result = json.loads(body)
-        except ValueError as exc:
-            raise RuntimeError(f"phone returned an invalid response (HTTP {response.status})") from exc
-        if response.status != 200 or result.get("status") != "paired":
-            raise RuntimeError(str(result.get("message") or result.get("status") or response.status))
-        return result, certificate
-    finally:
-        connection.close()
+            connection.connect()
+            current_certificate = connection.sock.getpeercert(binary_form=True)
+            if certificate is None:
+                if not confirm_certificate(current_certificate):
+                    raise RuntimeError("pairing cancelled; security codes did not match")
+                certificate = current_certificate
+            elif not hmac.compare_digest(certificate, current_certificate):
+                raise RuntimeError("phone identity changed while retrying; pairing cancelled")
+            connection.request(
+                "POST",
+                "/v1/pair",
+                body=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(payload)),
+                    "Connection": "close",
+                },
+            )
+            response = connection.getresponse()
+            body = response.read(8192).decode("utf-8", errors="replace")
+            try:
+                result = json.loads(body)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"phone returned an invalid response (HTTP {response.status})"
+                ) from exc
+            if response.status != 200 or result.get("status") != "paired":
+                raise RuntimeError(
+                    str(result.get("message") or result.get("status") or response.status)
+                )
+            return result, certificate
+        except transient_errors as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * (attempt + 1))
+        finally:
+            connection.close()
+    raise RuntimeError(
+        "phone closed the connection before returning pairing credentials; "
+        "the request was retried safely"
+    ) from last_error
+
+
+def confirm_pairing(host, token, certificate):
+    """Prove to the phone that the desktop received its credentials."""
+    context = ssl._create_unverified_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    last_error = None
+    transient_errors = (
+        http.client.RemoteDisconnected,
+        ConnectionResetError,
+        BrokenPipeError,
+        ssl.SSLError,
+        socket.timeout,
+    )
+    for attempt in range(3):
+        connection = http.client.HTTPSConnection(host, PORT, timeout=8, context=context)
+        try:
+            connection.connect()
+            current_certificate = connection.sock.getpeercert(binary_form=True)
+            if not hmac.compare_digest(certificate, current_certificate):
+                raise RuntimeError("phone identity changed before pairing confirmation")
+            connection.request(
+                "POST",
+                "/v1/pair/confirm",
+                body=b"",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Length": "0",
+                    "Connection": "close",
+                },
+            )
+            response = connection.getresponse()
+            body = response.read(8192).decode("utf-8", errors="replace")
+            try:
+                result = json.loads(body)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"phone returned an invalid confirmation (HTTP {response.status})"
+                ) from exc
+            if response.status != 200 or result.get("status") != "paired":
+                raise RuntimeError(str(result.get("status") or response.status))
+            return
+        except transient_errors as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * (attempt + 1))
+        finally:
+            connection.close()
+    raise RuntimeError("phone did not acknowledge pairing confirmation") from last_error
 
 
 def private_target(value):
@@ -345,6 +421,7 @@ def pair(args):
 
     result, certificate = pair_request(host, code, confirm_certificate)
     save_pairing(host, result, certificate)
+    confirm_pairing(host, str(result["token"]), certificate)
     print(f"Paired with {result.get('device_name') or 'Android phone'}.")
     test_phone()
     return 0
