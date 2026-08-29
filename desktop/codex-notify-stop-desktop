@@ -63,11 +63,14 @@ def notify(title, body):
             "--app-name=Codex Alert",
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
-            "--hint=string:desktop-entry:dev.rayan.codexalert",
-            # A completion is intentionally persistent: GNOME auto-hides
-            # normal banners after a few seconds, which is easy to miss.
-            # Critical urgency keeps this alert visible until it is dismissed.
-            "--urgency=critical",
+            # Keep completion notifications in the message tray without
+            # replacing earlier completions.  Critical urgency is tempting
+            # for persistence, but GNOME sessions can suppress its banner
+            # while still playing the alert sound.  Normal urgency reliably
+            # shows the banner; the explicit transient hint keeps it stored
+            # in the tray after the banner fades.
+            "--hint=boolean:transient:false",
+            "--urgency=normal",
             html.escape(title, quote=False),
             html.escape(body, quote=False),
         ]
@@ -88,8 +91,8 @@ def notify(title, body):
                     "--app-name=Codex Alert",
                     f"--app-icon={APP_ICON}",
                     f"--icon={APP_ICON}",
-                    "--hint=string:desktop-entry:dev.rayan.codexalert",
-                    "--urgency=critical",
+                    "--hint=boolean:transient:false",
+                    "--urgency=normal",
                     html.escape(title, quote=False),
                     html.escape(body, quote=False),
                 ],

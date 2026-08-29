@@ -555,7 +555,7 @@ def notify_delivery_problem(depth, error):
             NOTIFY_SEND, "--print-id", f"--replace-id={previous}",
             "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
-            "--hint=string:desktop-entry:dev.rayan.codexalert", "--urgency=low",
+            "--urgency=low",
             "Phone alerts are waiting",
             f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
         ],
@@ -565,8 +565,7 @@ def notify_delivery_problem(depth, error):
         result = subprocess.run(
             [
                 NOTIFY_SEND, "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
-                f"--icon={APP_ICON}",
-                "--hint=string:desktop-entry:dev.rayan.codexalert", "--urgency=low",
+                f"--icon={APP_ICON}", "--urgency=low",
                 "Phone alerts are waiting",
                 f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
             ],
