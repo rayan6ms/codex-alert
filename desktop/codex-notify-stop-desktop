@@ -64,7 +64,10 @@ def notify(title, body):
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
             "--hint=string:desktop-entry:dev.rayan.codexalert",
-            "--urgency=normal",
+            # A completion is intentionally persistent: GNOME auto-hides
+            # normal banners after a few seconds, which is easy to miss.
+            # Critical urgency keeps this alert visible until it is dismissed.
+            "--urgency=critical",
             html.escape(title, quote=False),
             html.escape(body, quote=False),
         ]
@@ -86,7 +89,7 @@ def notify(title, body):
                     f"--app-icon={APP_ICON}",
                     f"--icon={APP_ICON}",
                     "--hint=string:desktop-entry:dev.rayan.codexalert",
-                    "--urgency=normal",
+                    "--urgency=critical",
                     html.escape(title, quote=False),
                     html.escape(body, quote=False),
                 ],

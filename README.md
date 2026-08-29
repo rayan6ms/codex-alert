@@ -26,6 +26,8 @@ so the same installer works on GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt,
 Budgie, and other compatible X11 or Wayland desktops. No desktop extension is
 needed. A systemd user timer is used when available; other Linux systems use
 the standard [XDG autostart mechanism](https://specifications.freedesktop.org/autostart/latest/) instead.
+Completion alerts request persistent urgency so they stay visible until you
+dismiss them instead of disappearing as a short-lived banner.
 
 Check the result with:
 
