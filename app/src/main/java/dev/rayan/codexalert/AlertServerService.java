@@ -47,6 +47,7 @@ public final class AlertServerService extends Service {
     private static final int MAX_HEADER_BYTES = 8192;
     private static final int MAX_BODY_BYTES = 8192;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private static volatile boolean listenerReady;
     private Thread serverThread;
     private SSLServerSocket serverSocket;
     private NsdManager.RegistrationListener nsdListener;
@@ -58,9 +59,14 @@ public final class AlertServerService extends Service {
         context.startForegroundService(intent);
     }
 
+    static boolean isListening() {
+        return listenerReady;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        listenerReady = false;
         AlertNotifier.ensureChannels(this);
         showForeground(AlertNotifier.ready(this, "Starting private LAN/Tailscale receiver…"));
         running.set(true);
@@ -91,6 +97,7 @@ public final class AlertServerService extends Service {
     @Override
     public void onDestroy() {
         running.set(false);
+        listenerReady = false;
         closeServer();
         unregisterNsd();
         if (serverThread != null) {
@@ -122,6 +129,7 @@ public final class AlertServerService extends Service {
         while (running.get()) {
             try {
                 serverSocket = createServerSocket();
+                listenerReady = true;
                 failures = 0;
                 registerNsd();
                 AlertStore.serverState(this, "running", "");
@@ -146,6 +154,7 @@ public final class AlertServerService extends Service {
                     }
                 }
             } finally {
+                listenerReady = false;
                 closeServer();
                 unregisterNsd();
             }

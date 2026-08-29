@@ -2,6 +2,7 @@ package dev.rayan.codexalert;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
@@ -15,11 +16,14 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.format.DateFormat;
 import android.view.Gravity;
 import android.view.View;
+import android.view.animation.LinearInterpolator;
 import android.widget.Button;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -50,16 +54,36 @@ public final class MainActivity extends Activity {
             refreshHandler.postDelayed(this, 1000);
         }
     };
+    private final Runnable refreshCheck = new Runnable() {
+        @Override public void run() {
+            if (!refreshing) return;
+            long elapsed = SystemClock.elapsedRealtime() - refreshStartedAt;
+            if (AlertServerService.isListening() || elapsed >= 4_000) {
+                long minimumDisplay = 350 - elapsed;
+                if (minimumDisplay > 0) {
+                    refreshHandler.postDelayed(this, minimumDisplay);
+                } else {
+                    finishRefresh();
+                }
+                return;
+            }
+            refreshHandler.postDelayed(this, 200);
+        }
+    };
 
     private int setupStep;
     private boolean dashboard;
     private boolean lastNotifications;
+    private boolean refreshing;
+    private long refreshStartedAt;
+    private ObjectAnimator refreshAnimator;
     private TextView pairingCard;
     private TextView heroPill;
     private TextView heroTitle;
     private TextView heroDetail;
     private TextView receiverStatus;
     private TextView lastAlert;
+    private ImageButton refreshButton;
     private Button nextButton;
     private Switch t3Switch;
     private Switch autoClearSwitch;
@@ -92,6 +116,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         refreshHandler.removeCallbacks(periodicRefresh);
+        cancelRefresh();
         super.onPause();
     }
 
@@ -136,12 +161,17 @@ public final class MainActivity extends Activity {
     }
 
     private void resetReferences() {
+        if (refreshAnimator != null) {
+            refreshAnimator.cancel();
+            refreshAnimator = null;
+        }
         pairingCard = null;
         heroPill = null;
         heroTitle = null;
         heroDetail = null;
         receiverStatus = null;
         lastAlert = null;
+        refreshButton = null;
         nextButton = null;
         t3Switch = null;
         autoClearSwitch = null;
@@ -281,7 +311,14 @@ public final class MainActivity extends Activity {
     private void buildDashboard(LinearLayout content) {
         LinearLayout hero = card(Color.WHITE);
         heroPill = pill("CHECKING", AMBER_PALE, AMBER);
-        hero.addView(heroPill);
+        LinearLayout heroHeader = new LinearLayout(this);
+        heroHeader.setGravity(Gravity.CENTER_VERTICAL);
+        heroHeader.addView(heroPill);
+        View spacer = new View(this);
+        heroHeader.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
+        refreshButton = createRefreshButton();
+        heroHeader.addView(refreshButton);
+        hero.addView(heroHeader);
         heroTitle = text("Checking your receiver…", 26, INK);
         heroTitle.setTypeface(Typeface.DEFAULT_BOLD);
         addTop(hero, heroTitle, 18);
@@ -358,6 +395,72 @@ public final class MainActivity extends Activity {
                 12, MUTED);
         privacy.setGravity(Gravity.CENTER_HORIZONTAL);
         addTop(content, privacy, 24);
+    }
+
+    private ImageButton createRefreshButton() {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(R.drawable.ic_refresh);
+        button.setImageTintList(ColorStateList.valueOf(TEAL_DARK));
+        button.setBackground(rounded(TEAL_PALE, 24));
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
+        button.setContentDescription("Refresh connection status");
+        if (Build.VERSION.SDK_INT >= 26) {
+            button.setTooltipText("Refresh connection status");
+        }
+        button.setOnClickListener(view -> startRefresh());
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
+        return button;
+    }
+
+    private void startRefresh() {
+        if (refreshing) return;
+        refreshing = true;
+        refreshStartedAt = SystemClock.elapsedRealtime();
+        if (refreshButton != null) {
+            refreshButton.setEnabled(false);
+            refreshButton.setAlpha(0.45f);
+            refreshButton.setContentDescription("Refreshing connection status");
+            refreshAnimator = ObjectAnimator.ofFloat(refreshButton, View.ROTATION, 0f, 360f);
+            refreshAnimator.setDuration(800);
+            refreshAnimator.setInterpolator(new LinearInterpolator());
+            refreshAnimator.setRepeatCount(ObjectAnimator.INFINITE);
+            refreshAnimator.start();
+        }
+        try {
+            AlertServerService.start(this);
+        } catch (RuntimeException ignored) {
+            // The bounded check below will present OFFLINE with the retry action.
+        }
+        updateVisibleStatus();
+        refreshHandler.removeCallbacks(refreshCheck);
+        refreshHandler.post(refreshCheck);
+    }
+
+    private void finishRefresh() {
+        if (!refreshing) return;
+        refreshing = false;
+        refreshHandler.removeCallbacks(refreshCheck);
+        if (refreshAnimator != null) {
+            refreshAnimator.cancel();
+            refreshAnimator = null;
+        }
+        if (refreshButton != null) {
+            refreshButton.setRotation(0f);
+            refreshButton.setEnabled(true);
+            refreshButton.setAlpha(1f);
+            refreshButton.setContentDescription("Refresh connection status");
+        }
+        updateVisibleStatus();
+    }
+
+    private void cancelRefresh() {
+        if (!refreshing) return;
+        refreshing = false;
+        refreshHandler.removeCallbacks(refreshCheck);
+        if (refreshAnimator != null) {
+            refreshAnimator.cancel();
+            refreshAnimator = null;
+        }
     }
 
     private void addPageHeading(LinearLayout content, String title, String detail) {
@@ -452,7 +555,7 @@ public final class MainActivity extends Activity {
                 render();
                 return;
             }
-        } else if (notifications != lastNotifications) {
+        } else if (!refreshing && notifications != lastNotifications) {
             render();
             return;
         }
@@ -463,8 +566,8 @@ public final class MainActivity extends Activity {
     private void updateVisibleStatus() {
         boolean paired = DeviceIdentity.isPaired(this);
         boolean notifications = notificationsAllowed();
+        boolean listening = AlertServerService.isListening();
         var status = getSharedPreferences("status", Context.MODE_PRIVATE);
-        String serverState = status.getString("server_state", "starting");
         if (nextButton != null) {
             boolean enabled = setupStep == 0 ? notifications
                     : setupStep == 1 ? paired : paired && notifications;
@@ -473,34 +576,42 @@ public final class MainActivity extends Activity {
         }
         if (pairingCard != null) updatePairingCard(paired);
         if (heroTitle != null) {
-            boolean ready = paired && notifications && "running".equals(serverState);
-            if (ready) {
+            boolean ready = paired && notifications && listening;
+            if (refreshing) {
+                stylePill(heroPill, "●  CHECKING", AMBER_PALE, AMBER);
+                heroTitle.setText("Checking the receiver…");
+                heroDetail.setText("Refreshing the secure connection status.");
+                heroPill.setContentDescription("Status: checking");
+            } else if (ready) {
                 stylePill(heroPill, "●  READY", GREEN_PALE, GREEN);
                 heroTitle.setText("Codex Alert is working");
                 heroDetail.setText("Your phone is connected and ready for completion alerts.");
+                heroPill.setContentDescription("Status: ready");
+            } else if (!paired) {
+                stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);
+                heroTitle.setText("Computer not paired");
+                heroDetail.setText("Pair this phone with your computer to receive completions.");
+                heroPill.setContentDescription("Status: offline");
             } else if (!notifications) {
-                stylePill(heroPill, "ACTION NEEDED", AMBER_PALE, AMBER);
+                stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);
                 heroTitle.setText("Notifications are blocked");
                 heroDetail.setText("Allow notifications to receive Codex completions on this phone.");
-            } else if ("error".equals(serverState)) {
-                stylePill(heroPill, "RETRYING", RED_PALE, RED);
-                heroTitle.setText("Receiver needs attention");
-                heroDetail.setText("Codex Alert is retrying automatically. Check your network settings.");
+                heroPill.setContentDescription("Status: offline");
             } else {
-                stylePill(heroPill, "STARTING", AMBER_PALE, AMBER);
-                heroTitle.setText("Starting the receiver…");
-                heroDetail.setText("This normally takes only a moment.");
+                stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);
+                heroTitle.setText("Receiver needs attention");
+                heroDetail.setText("The secure receiver is not listening. Tap refresh to try again.");
+                heroPill.setContentDescription("Status: offline");
             }
         }
         if (receiverStatus != null) {
-            String serverLine = "running".equals(serverState) ? "✓  Receiver active"
-                    : "error".equals(serverState) ? "!  Receiver retrying" : "…  Receiver starting";
+            String serverLine = listening ? "✓  Receiver active" : "!  Receiver offline";
             receiverStatus.setText(serverLine
                     + "\n" + (notifications ? "✓  Notifications allowed" : "!  Notifications blocked")
                     + "\n" + (paired ? "✓  Computer paired securely" : "!  Computer not paired")
                     + "\n\nNetwork  ·  " + AlertServerService.networkSummary().replace("\n", "  ·  "));
             receiverStatus.setTextColor(
-                    paired && notifications && "running".equals(serverState) ? INK : AMBER);
+                    paired && notifications && listening ? INK : RED);
         }
         if (lastAlert != null) {
             long lastTime = status.getLong("last_time", 0);
@@ -508,6 +619,10 @@ public final class MainActivity extends Activity {
                     : "LAST ALERT  ·  " + DateFormat.getTimeFormat(this).format(new Date(lastTime))
                     + "\n" + status.getString("last_title", "Codex finished")
                     + "\n" + status.getString("last_body", "Task completed."));
+        }
+        if (refreshButton != null) {
+            refreshButton.setEnabled(!refreshing);
+            refreshButton.setAlpha(refreshing ? 0.45f : 1f);
         }
         updateT3Controls();
     }

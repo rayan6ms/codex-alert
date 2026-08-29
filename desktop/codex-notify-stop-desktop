@@ -13,7 +13,6 @@ from pathlib import Path
 
 HOME = Path.home()
 STATE_DIR = HOME / ".local/state/codex-notify"
-ID_FILE = STATE_DIR / "desktop-notification-id"
 LOCK_FILE = STATE_DIR / "desktop-notification.lock"
 LOG_FILE = STATE_DIR / "desktop-delivery.log"
 LOG_LOCK_FILE = STATE_DIR / "desktop-delivery-log.lock"
@@ -58,15 +57,9 @@ def notify(title, body):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            replace_id = int(ID_FILE.read_text(encoding="ascii").strip())
-        except (OSError, ValueError):
-            replace_id = 0
-
         command = [
             notify_send,
             "--print-id",
-            f"--replace-id={replace_id}",
             "--app-name=Codex Alert",
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
@@ -84,7 +77,7 @@ def notify(title, body):
             text=True,
         )
         if result.returncode != 0:
-            # Older notify-send versions lack replacement IDs but still
+            # Older notify-send versions may lack --print-id but still
             # implement the core freedesktop.org notification protocol.
             result = subprocess.run(
                 [
@@ -104,8 +97,6 @@ def notify(title, body):
                 text=True,
             )
         new_id = result.stdout.strip()
-        if result.returncode == 0 and new_id.isdigit():
-            ID_FILE.write_text(new_id + "\n", encoding="ascii")
         return result.returncode, result.stderr.strip(), new_id
 
 

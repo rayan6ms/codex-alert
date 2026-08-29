@@ -20,7 +20,6 @@ class DesktopNotificationTests(unittest.TestCase):
         state = Path(self.temporary.name)
         replacements = {
             "STATE_DIR": state,
-            "ID_FILE": state / "notification-id",
             "LOCK_FILE": state / "notification.lock",
         }
         self.patchers = [patch.object(MODULE, name, value) for name, value in replacements.items()]
@@ -46,9 +45,9 @@ class DesktopNotificationTests(unittest.TestCase):
         self.assertIn(f"--app-icon={MODULE.APP_ICON}", command)
         self.assertIn(f"--icon={MODULE.APP_ICON}", command)
         self.assertIn("--hint=string:desktop-entry:dev.rayan.codexalert", command)
+        self.assertFalse(any(argument.startswith("--replace-id=") for argument in command))
         self.assertIn("Done &lt;now&gt;", command)
         self.assertIn("A &amp; B", command)
-        self.assertEqual(MODULE.ID_FILE.read_text(encoding="ascii"), "42\n")
 
     def test_missing_notification_tool_returns_a_clear_error(self):
         with patch.object(MODULE.shutil, "which", return_value=None):
@@ -57,7 +56,7 @@ class DesktopNotificationTests(unittest.TestCase):
                 (1, "notify-send is not installed", ""),
             )
 
-    def test_older_notify_send_falls_back_without_replacement_options(self):
+    def test_older_notify_send_falls_back_without_print_id(self):
         unsupported = subprocess.CompletedProcess([], 1, stdout="", stderr="unknown option")
         delivered = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with (
@@ -68,7 +67,6 @@ class DesktopNotificationTests(unittest.TestCase):
 
         fallback = run.call_args_list[1].args[0]
         self.assertNotIn("--print-id", fallback)
-        self.assertFalse(any(argument.startswith("--replace-id=") for argument in fallback))
         self.assertIn(f"--app-icon={MODULE.APP_ICON}", fallback)
 
     def test_sound_falls_back_to_paplay(self):

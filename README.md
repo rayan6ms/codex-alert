@@ -45,6 +45,9 @@ codex-alert test
 After setup, the installation steps disappear. The app opens to a status
 dashboard that clearly shows whether the receiver, notifications, and secure
 computer pairing are working, along with the most recently received alert.
+The dashboard's READY indicator is based on the receiver's live listening
+socket, not a stale saved status. Use the refresh icon beside it to restart
+the receiver check; the control is disabled while that check is in progress.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses
