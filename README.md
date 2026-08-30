@@ -27,8 +27,9 @@ Budgie, and other compatible X11 or Wayland desktops. No desktop extension is
 needed. A systemd user timer is used when available; other Linux systems use
 the standard [XDG autostart mechanism](https://specifications.freedesktop.org/autostart/latest/) instead.
 Completion alerts use a normal, non-transient notification so the banner is
-visible reliably on GNOME and other desktop environments. Each completion is
-kept in the notification tray and is never replaced by a later completion.
+visible reliably on GNOME and other desktop environments. The latest
+completion replaces the previous Codex Alert entry, keeping the notification
+tray useful instead of accumulating stale completion banners.
 The Codex/OpenAI icon is supplied directly to the notification service so it
 does not depend on desktop-entry app registration.
 

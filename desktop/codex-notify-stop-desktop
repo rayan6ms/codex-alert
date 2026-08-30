@@ -13,6 +13,7 @@ from pathlib import Path
 
 HOME = Path.home()
 STATE_DIR = HOME / ".local/state/codex-notify"
+ID_FILE = STATE_DIR / "desktop-notification-id"
 LOCK_FILE = STATE_DIR / "desktop-notification.lock"
 LOG_FILE = STATE_DIR / "desktop-delivery.log"
 LOG_LOCK_FILE = STATE_DIR / "desktop-delivery-log.lock"
@@ -57,15 +58,25 @@ def notify(title, body):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            replace_id = int(ID_FILE.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            replace_id = 0
+
+        # Replacing the previous notification is the freedesktop.org-native
+        # way to keep one current completion visible. It is atomic from the
+        # shell's perspective, unlike CloseNotification followed by Notify,
+        # which briefly removes the alert and can race with another event.
         command = [
             notify_send,
             "--print-id",
+            f"--replace-id={replace_id}",
             "--app-name=Codex Alert",
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
-            # Keep completion notifications in the message tray without
-            # replacing earlier completions.  Critical urgency is tempting
-            # for persistence, but GNOME sessions can suppress its banner
+            # Keep the current completion in the message tray. Critical
+            # urgency is tempting for persistence, but GNOME sessions can
+            # suppress its banner
             # while still playing the alert sound.  Normal urgency reliably
             # shows the banner; the explicit transient hint keeps it stored
             # in the tray after the banner fades.
@@ -83,8 +94,28 @@ def notify(title, body):
             text=True,
         )
         if result.returncode != 0:
-            # Older notify-send versions may lack --print-id but still
-            # implement the core freedesktop.org notification protocol.
+            # Older notify-send versions may lack --print-id. Keep the
+            # replacement request when possible, then fall back to the core
+            # protocol if replacement options are unavailable as well.
+            result = subprocess.run(
+                [
+                    notify_send,
+                    f"--replace-id={replace_id}",
+                    "--app-name=Codex Alert",
+                    f"--app-icon={APP_ICON}",
+                    f"--icon={APP_ICON}",
+                    "--hint=boolean:transient:false",
+                    "--urgency=normal",
+                    html.escape(title, quote=False),
+                    html.escape(body, quote=False),
+                ],
+                env=clean_environment(),
+                check=False,
+                timeout=3,
+                capture_output=True,
+                text=True,
+            )
+        if result.returncode != 0:
             result = subprocess.run(
                 [
                     notify_send,
@@ -103,6 +134,12 @@ def notify(title, body):
                 text=True,
             )
         new_id = result.stdout.strip()
+        if result.returncode == 0 and new_id.isdigit():
+            ID_FILE.write_text(new_id + "\n", encoding="ascii")
+        elif result.returncode == 0:
+            # A successful old notify-send may not print an ID, so do not
+            # accidentally replace a future, unrelated notification ID.
+            ID_FILE.unlink(missing_ok=True)
         return result.returncode, result.stderr.strip(), new_id
 
 

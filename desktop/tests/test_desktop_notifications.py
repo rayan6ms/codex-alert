@@ -20,6 +20,7 @@ class DesktopNotificationTests(unittest.TestCase):
         state = Path(self.temporary.name)
         replacements = {
             "STATE_DIR": state,
+            "ID_FILE": state / "notification-id",
             "LOCK_FILE": state / "notification.lock",
         }
         self.patchers = [patch.object(MODULE, name, value) for name, value in replacements.items()]
@@ -44,12 +45,13 @@ class DesktopNotificationTests(unittest.TestCase):
         self.assertEqual(command[0], "/custom/bin/notify-send")
         self.assertIn(f"--app-icon={MODULE.APP_ICON}", command)
         self.assertIn(f"--icon={MODULE.APP_ICON}", command)
+        self.assertIn("--replace-id=0", command)
         self.assertNotIn("--hint=string:desktop-entry:dev.rayan.codexalert", command)
         self.assertIn("--urgency=normal", command)
         self.assertIn("--hint=boolean:transient:false", command)
-        self.assertFalse(any(argument.startswith("--replace-id=") for argument in command))
         self.assertIn("Done &lt;now&gt;", command)
         self.assertIn("A &amp; B", command)
+        self.assertEqual(MODULE.ID_FILE.read_text(encoding="ascii"), "42\n")
 
     def test_missing_notification_tool_returns_a_clear_error(self):
         with patch.object(MODULE.shutil, "which", return_value=None):
@@ -69,9 +71,23 @@ class DesktopNotificationTests(unittest.TestCase):
 
         fallback = run.call_args_list[1].args[0]
         self.assertNotIn("--print-id", fallback)
+        self.assertIn("--replace-id=0", fallback)
         self.assertIn(f"--app-icon={MODULE.APP_ICON}", fallback)
         self.assertIn("--urgency=normal", fallback)
         self.assertIn("--hint=boolean:transient:false", fallback)
+
+    def test_new_completion_replaces_previous_notification(self):
+        MODULE.ID_FILE.write_text("17\n", encoding="ascii")
+        result = subprocess.CompletedProcess([], 0, stdout="23\n", stderr="")
+        with (
+            patch.object(MODULE.shutil, "which", return_value="/usr/bin/notify-send"),
+            patch.object(MODULE.subprocess, "run", return_value=result) as run,
+        ):
+            self.assertEqual(MODULE.notify("Done", "Body"), (0, "", "23"))
+
+        command = run.call_args.args[0]
+        self.assertIn("--replace-id=17", command)
+        self.assertEqual(MODULE.ID_FILE.read_text(encoding="ascii"), "23\n")
 
     def test_sound_falls_back_to_paplay(self):
         sound = Path(self.temporary.name) / "complete.oga"
