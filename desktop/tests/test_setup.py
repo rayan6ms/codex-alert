@@ -353,6 +353,7 @@ class HookSetupTests(unittest.TestCase):
             lock = Path(temporary) / "watch.lock"
             with (
                 patch.object(MODULE, "WATCH_LOCK", lock),
+                patch.object(MODULE, "FAILURE_WATCH", Path(temporary) / "missing-failure-watch"),
                 patch.object(MODULE, "sync_hooks", return_value=0) as sync,
                 patch.object(MODULE.time, "sleep", side_effect=KeyboardInterrupt),
                 self.assertRaises(KeyboardInterrupt),

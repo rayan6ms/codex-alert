@@ -35,6 +35,7 @@ jobs:
           python3 -W error::ResourceWarning -m unittest discover -s desktop/tests -v
           python3 -m py_compile \
             desktop/codex-alert \
+            desktop/codex-alert-failure-watch \
             desktop/codex-notify-stop \
             desktop/codex-notify-stop-desktop \
             desktop/codex-phone-deliver \

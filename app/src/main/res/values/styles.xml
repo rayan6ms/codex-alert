@@ -8,5 +8,13 @@
         <item name="android:windowLightStatusBar">true</item>
     </style>
 
+    <style name="Theme.CodexAlert.Dark" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#5EEAD4</item>
+        <item name="android:navigationBarColor">#0F1715</item>
+        <item name="android:statusBarColor">#0F1715</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
     <style name="Theme.CodexAlert.NoDisplay" parent="android:style/Theme.NoDisplay" />
 </resources>

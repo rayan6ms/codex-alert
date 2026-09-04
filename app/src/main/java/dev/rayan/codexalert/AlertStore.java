@@ -1,14 +1,37 @@
 package dev.rayan.codexalert;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 final class AlertStore {
     private static final String PREFERENCES = "status";
+    private static final String ALERT_HISTORY = "alert_history_v1";
+    private static final int ALERT_HISTORY_LIMIT = 5;
+
+    static final class AlertRecord {
+        final String eventId;
+        final String title;
+        final String body;
+        final long receivedAt;
+
+        AlertRecord(String eventId, String title, String body, long receivedAt) {
+            this.eventId = eventId;
+            this.title = title;
+            this.body = body;
+            this.receivedAt = receivedAt;
+        }
+    }
 
     private AlertStore() {}
 
@@ -41,6 +64,7 @@ final class AlertStore {
             long sentAt
     ) {
         var preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+        long receivedAt = System.currentTimeMillis();
         ArrayDeque<String> ids = new ArrayDeque<>();
         if (!eventId.isEmpty()) {
             ids.add(eventId);
@@ -51,7 +75,14 @@ final class AlertStore {
             }
         }
 
-        preferences.edit()
+        List<AlertRecord> history = readHistory(preferences);
+        history.removeIf(alert -> alert.eventId.equals(eventId));
+        history.add(0, new AlertRecord(eventId, title, body, receivedAt));
+        while (history.size() > ALERT_HISTORY_LIMIT) {
+            history.remove(history.size() - 1);
+        }
+
+        SharedPreferences.Editor editor = preferences.edit()
                 .putString("recent_event_ids", String.join("\n", ids))
                 .putString("last_title", title)
                 .putString("last_body", body)
@@ -63,10 +94,71 @@ final class AlertStore {
                 .putString("last_transport", transport)
                 .putLong("last_completed_time", completedAt)
                 .putLong("last_sent_time", sentAt)
-                .putLong("last_time", System.currentTimeMillis())
+                .putLong("last_time", receivedAt)
                 .putLong("received_count", preferences.getLong("received_count", 0) + 1)
-                .remove("last_delivery_error")
-                .apply();
+                .remove("last_delivery_error");
+        String encodedHistory = encodeHistory(history);
+        if (encodedHistory != null) {
+            editor.putString(ALERT_HISTORY, encodedHistory);
+        }
+        editor.apply();
+    }
+
+    static synchronized List<AlertRecord> recentAlerts(Context context) {
+        return new ArrayList<>(readHistory(
+                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        ));
+    }
+
+    private static List<AlertRecord> readHistory(SharedPreferences preferences) {
+        List<AlertRecord> history = new ArrayList<>();
+        String encoded = preferences.getString(ALERT_HISTORY, "");
+        if (encoded != null && !encoded.isEmpty()) {
+            try {
+                JSONArray array = new JSONArray(encoded);
+                for (int index = 0; index < array.length() && history.size() < ALERT_HISTORY_LIMIT;
+                     index++) {
+                    JSONObject value = array.getJSONObject(index);
+                    String eventId = value.optString("event_id", "");
+                    String title = value.optString("title", "");
+                    String body = value.optString("body", "");
+                    long receivedAt = value.optLong("received_at", 0);
+                    if (!title.isEmpty() && receivedAt > 0) {
+                        history.add(new AlertRecord(eventId, title, body, receivedAt));
+                    }
+                }
+            } catch (JSONException ignored) {
+                // Fall through to the legacy last-alert values when possible.
+            }
+        }
+        if (history.isEmpty()) {
+            long lastTime = preferences.getLong("last_time", 0);
+            if (lastTime > 0) {
+                history.add(new AlertRecord(
+                        preferences.getString("last_event_id", ""),
+                        preferences.getString("last_title", "Codex finished"),
+                        preferences.getString("last_body", "Task completed."),
+                        lastTime
+                ));
+            }
+        }
+        return history;
+    }
+
+    private static String encodeHistory(List<AlertRecord> history) {
+        JSONArray array = new JSONArray();
+        try {
+            for (AlertRecord alert : history) {
+                array.put(new JSONObject()
+                        .put("event_id", alert.eventId)
+                        .put("title", alert.title)
+                        .put("body", alert.body)
+                        .put("received_at", alert.receivedAt));
+            }
+            return array.toString();
+        } catch (JSONException ignored) {
+            return null;
+        }
     }
 
     static synchronized String activeEventId(Context context) {

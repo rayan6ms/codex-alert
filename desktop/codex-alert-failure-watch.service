@@ -1,0 +1,21 @@
+[Unit]
+Description=Watch Codex turns for terminal failure alerts
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/codex-alert-failure-watch
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+LockPersonality=true
+MemoryHigh=64M
+MemoryMax=96M
+CPUQuota=10%
+TasksMax=8
+
+[Install]
+WantedBy=default.target

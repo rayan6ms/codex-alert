@@ -20,6 +20,8 @@ install -m 644 "${project_dir}/LICENSE" "${package_dir}/LICENSE"
 
 for source in \
     codex-alert \
+    codex-alert-failure-watch \
+    codex-alert-failure-watch.service \
     codex-alert-hooks.service \
     codex-alert-hooks.timer \
     codex-notify-stop \
@@ -36,6 +38,7 @@ for source in \
 done
 chmod 755 \
     "${package_dir}/desktop/codex-alert" \
+    "${package_dir}/desktop/codex-alert-failure-watch" \
     "${package_dir}/desktop/codex-notify-stop" \
     "${package_dir}/desktop/codex-notify-stop-desktop" \
     "${package_dir}/desktop/codex-phone-deliver" \

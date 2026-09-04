@@ -22,6 +22,8 @@ PHONE = HOME / ".local/bin/codex-phone-deliver"
 STATE_DIR = HOME / ".local/state/codex-notify"
 LOG_FILE = STATE_DIR / "hook-wrapper.log"
 LOG_LOCK_FILE = STATE_DIR / "hook-wrapper-log.lock"
+RECENT_EVENTS_FILE = STATE_DIR / "hook-wrapper-recent-events"
+EVENT_LOCK_FILE = STATE_DIR / "hook-wrapper-events.lock"
 MAX_LOG_BYTES = 1024 * 1024
 T3_STATE_DIR = HOME / ".t3/userdata"
 T3_ENVIRONMENT_ID_FILE = T3_STATE_DIR / "environment-id"
@@ -123,6 +125,65 @@ def completion_id(payload, account):
     return "codex-" + hashlib.sha256(identity).hexdigest()[:32]
 
 
+def process_ancestry(parent_pid=None, proc_root=Path("/proc"), limit=12):
+    """Return argv arrays for the current process's Linux ancestors."""
+    pid = os.getppid() if parent_pid is None else parent_pid
+    ancestry = []
+    seen = set()
+    for _ in range(limit):
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+        process_dir = proc_root / str(pid)
+        try:
+            arguments = [
+                value.decode("utf-8", errors="replace")
+                for value in process_dir.joinpath("cmdline").read_bytes().split(b"\0")
+                if value
+            ]
+            ancestry.append(arguments)
+            parent = next(
+                line for line in process_dir.joinpath("status").read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+                if line.startswith("PPid:")
+            )
+            pid = int(parent.split(":", 1)[1].strip())
+        except (OSError, StopIteration, ValueError):
+            break
+    return ancestry
+
+
+def is_ephemeral_codex_exec(ancestry=None):
+    """Identify helper generations such as T3's title/PR/branch writers.
+
+    T3 runs those jobs as ``codex exec --ephemeral``. Since Codex 0.152 they
+    also emit the user's global Stop hook. They are not thread-agent turns and
+    must not produce completion alerts.
+    """
+    commands = process_ancestry() if ancestry is None else ancestry
+    return any("exec" in arguments and "--ephemeral" in arguments for arguments in commands)
+
+
+def remember_dispatch(event_id):
+    """Claim one completion before launching either delivery path."""
+    if not event_id:
+        return True
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with EVENT_LOCK_FILE.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            recent = RECENT_EVENTS_FILE.read_text(encoding="ascii").splitlines()
+        except OSError:
+            recent = []
+        if event_id in recent:
+            return False
+        RECENT_EVENTS_FILE.write_text(
+            "\n".join([event_id, *recent[:127]]) + "\n", encoding="ascii"
+        )
+        return True
+
+
 def t3_thread_target(payload):
     """Map Codex's provider thread id to T3's environment-scoped thread id."""
     if not t3_enabled():
@@ -195,6 +256,10 @@ def launch(command):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--account", default="codex")
+    parser.add_argument(
+        "--failure", action="store_true",
+        help="dispatch a terminal task failure observed in the rollout log",
+    )
     args = parser.parse_args()
 
     try:
@@ -203,16 +268,44 @@ def main():
         payload = {}
 
     account = account_name(args.account)
+    if is_ephemeral_codex_exec():
+        log({
+            "event": "ephemeral-completion-ignored",
+            "account": account,
+            "model": compact(payload.get("model"), 100),
+            "session_id": payload.get("session_id"),
+            "turn_id": payload.get("turn_id"),
+        })
+        print("{}")
+        return 0
+
     cwd = str(payload.get("cwd") or os.getcwd())
     project = Path(cwd).name or cwd or "Codex"
     model = compact(payload.get("model"), 100)
-    message = compact(markdown_to_plain_text(
-        payload.get("last_assistant_message") or "Task completed."
-    ))
-    title = f"Codex finished · {project}"
+    if args.failure:
+        message = compact(markdown_to_plain_text(
+            payload.get("error") or "The Codex task failed."
+        ))
+        title = f"Codex failed · {project}"
+    else:
+        message = compact(markdown_to_plain_text(
+            payload.get("last_assistant_message") or "Task completed."
+        ))
+        title = f"Codex finished · {project}"
     details = account + (f" · {model}" if model else "")
     body = details + (f"\n{message}" if message else "")
     event_id = completion_id(payload, account)
+    if not remember_dispatch(event_id):
+        log({
+            "event": "duplicate-terminal-event-ignored",
+            "outcome": "failure" if args.failure else "completion",
+            "account": account,
+            "session_id": payload.get("session_id"),
+            "turn_id": payload.get("turn_id"),
+            "event_id": event_id,
+        })
+        print("{}")
+        return 0
     t3_target = t3_thread_target(payload)
 
     common = ["--title", title, "--body", body, "--account", account, "--project", project]
@@ -226,7 +319,7 @@ def main():
     )
 
     log({
-        "event": "completion-dispatched",
+        "event": "failure-dispatched" if args.failure else "completion-dispatched",
         "account": account,
         "project": project,
         "model": model,

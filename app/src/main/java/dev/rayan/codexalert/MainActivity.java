@@ -12,6 +12,7 @@ import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -30,22 +31,27 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 import java.util.Date;
+import java.util.List;
 
 @SuppressLint("SetTextI18n")
 public final class MainActivity extends Activity {
-    private static final int INK = Color.rgb(16, 32, 29);
-    private static final int MUTED = Color.rgb(82, 100, 95);
-    private static final int TEAL = Color.rgb(8, 127, 112);
-    private static final int TEAL_DARK = Color.rgb(5, 98, 86);
-    private static final int TEAL_PALE = Color.rgb(221, 244, 239);
-    private static final int GREEN = Color.rgb(20, 125, 85);
-    private static final int GREEN_PALE = Color.rgb(224, 246, 235);
-    private static final int AMBER = Color.rgb(151, 91, 8);
-    private static final int AMBER_PALE = Color.rgb(255, 242, 211);
-    private static final int RED = Color.rgb(178, 48, 48);
-    private static final int RED_PALE = Color.rgb(255, 231, 231);
-    private static final int BACKGROUND = Color.rgb(244, 247, 246);
-    private static final int DIVIDER = Color.rgb(218, 226, 223);
+    private int INK;
+    private int MUTED;
+    private int TEAL;
+    private int TEAL_DARK;
+    private int TEAL_PRESSED;
+    private int TEAL_PALE;
+    private int GREEN;
+    private int GREEN_PALE;
+    private int AMBER;
+    private int AMBER_PALE;
+    private int RED;
+    private int RED_PALE;
+    private int RED_PRESSED;
+    private int BACKGROUND;
+    private int SURFACE;
+    private int SURFACE_MUTED;
+    private int DIVIDER;
 
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
     private final Runnable periodicRefresh = new Runnable() {
@@ -74,6 +80,7 @@ public final class MainActivity extends Activity {
     private int setupStep;
     private boolean dashboard;
     private boolean lastNotifications;
+    private boolean darkMode;
     private boolean refreshing;
     private long refreshStartedAt;
     private ObjectAnimator refreshAnimator;
@@ -83,15 +90,25 @@ public final class MainActivity extends Activity {
     private TextView heroDetail;
     private TextView receiverStatus;
     private TextView lastAlert;
+    private TextView alertPosition;
     private ImageButton refreshButton;
+    private ImageButton olderAlertButton;
+    private ImageButton newerAlertButton;
     private Button nextButton;
     private Switch t3Switch;
     private Switch autoClearSwitch;
     private Button usageAccessButton;
+    private int alertHistoryIndex;
+    private String historyNewestEventId = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        darkMode = getSharedPreferences("ui", Context.MODE_PRIVATE)
+                .getBoolean("dark_mode", false);
+        setTheme(darkMode ? R.style.Theme_CodexAlert_Dark : R.style.Theme_CodexAlert);
         super.onCreate(savedInstanceState);
+        applyPalette();
+        applySystemBars();
         AlertNotifier.ensureChannels(this);
         AlertServerService.start(this);
         boolean paired = DeviceIdentity.isPaired(this);
@@ -171,7 +188,10 @@ public final class MainActivity extends Activity {
         heroDetail = null;
         receiverStatus = null;
         lastAlert = null;
+        alertPosition = null;
         refreshButton = null;
+        olderAlertButton = null;
+        newerAlertButton = null;
         nextButton = null;
         t3Switch = null;
         autoClearSwitch = null;
@@ -191,6 +211,13 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams params = wrap();
         params.setMargins(dp(11), 0, 0, 0);
         brand.addView(name, params);
+        brand.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        ImageButton themeButton = iconButton(
+                darkMode ? R.drawable.ic_light_mode : R.drawable.ic_dark_mode,
+                darkMode ? "Use light theme" : "Use dark theme",
+                view -> toggleTheme()
+        );
+        brand.addView(themeButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
         content.addView(brand);
     }
 
@@ -224,7 +251,7 @@ public final class MainActivity extends Activity {
     private void buildNotificationStep(LinearLayout content) {
         addPageHeading(content, "Let alerts reach you",
                 "Allow completion notifications so you know immediately when Codex has finished.");
-        LinearLayout card = card(Color.WHITE);
+        LinearLayout card = card(SURFACE);
         card.addView(iconCircle("1", TEAL_PALE, TEAL));
         TextView title = text("Notifications", 18, INK);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -244,7 +271,7 @@ public final class MainActivity extends Activity {
     private void buildPairingStep(LinearLayout content) {
         addPageHeading(content, "Connect this phone",
                 "Pair once with your computer over the same trusted Wi-Fi or Tailscale network.");
-        LinearLayout pairing = card(Color.WHITE);
+        LinearLayout pairing = card(SURFACE);
         pairingCard = text("", 15, MUTED);
         pairing.addView(pairingCard);
         if (!DeviceIdentity.isPaired(this)) {
@@ -254,7 +281,7 @@ public final class MainActivity extends Activity {
         }
         addTop(content, pairing, 26);
 
-        LinearLayout command = card(Color.rgb(236, 241, 239));
+        LinearLayout command = card(SURFACE_MUTED);
         TextView commandLabel = text("ON YOUR COMPUTER", 11, MUTED);
         commandLabel.setTypeface(Typeface.DEFAULT_BOLD);
         command.addView(commandLabel);
@@ -309,7 +336,7 @@ public final class MainActivity extends Activity {
     }
 
     private void buildDashboard(LinearLayout content) {
-        LinearLayout hero = card(Color.WHITE);
+        LinearLayout hero = card(SURFACE);
         heroPill = pill("CHECKING", AMBER_PALE, AMBER);
         LinearLayout heroHeader = new LinearLayout(this);
         heroHeader.setGravity(Gravity.CENTER_VERTICAL);
@@ -329,12 +356,35 @@ public final class MainActivity extends Activity {
         addTop(content, sectionTitle("Status"), 28);
         receiverStatus = text("", 15, INK);
         receiverStatus.setPadding(dp(18), dp(17), dp(18), dp(17));
-        receiverStatus.setBackground(rounded(Color.WHITE, 16));
+        receiverStatus.setBackground(rounded(SURFACE, 16));
         content.addView(receiverStatus);
         lastAlert = text("", 14, MUTED);
-        lastAlert.setPadding(dp(18), dp(17), dp(18), dp(17));
-        lastAlert.setBackground(rounded(Color.WHITE, 16));
-        addTop(content, lastAlert, 10);
+        LinearLayout alertCard = card(SURFACE);
+        LinearLayout historyNavigation = new LinearLayout(this);
+        historyNavigation.setGravity(Gravity.CENTER_VERTICAL);
+        alertPosition = text("", 13, MUTED);
+        alertPosition.setTypeface(Typeface.DEFAULT_BOLD);
+        historyNavigation.addView(
+                alertPosition,
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)
+        );
+        olderAlertButton = iconButton(
+                R.drawable.ic_chevron_left,
+                "Show older notification",
+                view -> showOlderAlert()
+        );
+        newerAlertButton = iconButton(
+                R.drawable.ic_chevron_right,
+                "Show newer notification",
+                view -> showNewerAlert()
+        );
+        LinearLayout.LayoutParams olderParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        olderParams.setMargins(0, 0, dp(8), 0);
+        historyNavigation.addView(olderAlertButton, olderParams);
+        historyNavigation.addView(newerAlertButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        alertCard.addView(historyNavigation);
+        addTop(alertCard, lastAlert, 12);
+        addTop(content, alertCard, 10);
 
         LinearLayout actions = new LinearLayout(this);
         actions.addView(primaryButton("Send test alert", view -> sendLocalTest()),
@@ -353,7 +403,7 @@ public final class MainActivity extends Activity {
         content.addView(text(
                 "Open the exact T3 Code thread when you tap an alert. This stays off unless you enable it.",
                 14, MUTED));
-        LinearLayout preferences = card(Color.WHITE);
+        LinearLayout preferences = card(SURFACE);
         t3Switch = toggle("Open exact T3 Code thread", T3Integration.enabled(this), checked -> {
             T3Integration.setEnabled(this, checked);
             if (!checked && autoClearSwitch != null) {
@@ -379,7 +429,7 @@ public final class MainActivity extends Activity {
         addTop(content, preferences, 12);
 
         addTop(content, sectionTitle("Device & security"), 30);
-        LinearLayout security = card(Color.WHITE);
+        LinearLayout security = card(SURFACE);
         TextView securityLabel = text("SECURITY CODE", 11, MUTED);
         securityLabel.setTypeface(Typeface.DEFAULT_BOLD);
         security.addView(securityLabel);
@@ -398,18 +448,52 @@ public final class MainActivity extends Activity {
     }
 
     private ImageButton createRefreshButton() {
-        ImageButton button = new ImageButton(this);
-        button.setImageResource(R.drawable.ic_refresh);
-        button.setImageTintList(ColorStateList.valueOf(TEAL_DARK));
-        button.setBackground(rounded(TEAL_PALE, 24));
-        button.setPadding(dp(12), dp(12), dp(12), dp(12));
-        button.setContentDescription("Refresh connection status");
-        if (Build.VERSION.SDK_INT >= 26) {
-            button.setTooltipText("Refresh connection status");
-        }
-        button.setOnClickListener(view -> startRefresh());
+        ImageButton button = iconButton(
+                R.drawable.ic_refresh,
+                "Refresh connection status",
+                view -> startRefresh()
+        );
         button.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
         return button;
+    }
+
+    private ImageButton iconButton(
+            int drawable,
+            String contentDescription,
+            View.OnClickListener listener
+    ) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(drawable);
+        button.setImageTintList(ColorStateList.valueOf(TEAL_DARK));
+        button.setBackground(interactiveRounded(TEAL_PALE, SURFACE_MUTED, 24));
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
+        button.setContentDescription(contentDescription);
+        button.setTooltipText(contentDescription);
+        button.setOnClickListener(listener);
+        return button;
+    }
+
+    private void toggleTheme() {
+        darkMode = !darkMode;
+        getSharedPreferences("ui", Context.MODE_PRIVATE).edit()
+                .putBoolean("dark_mode", darkMode)
+                .apply();
+        recreate();
+    }
+
+    private void showOlderAlert() {
+        int count = AlertStore.recentAlerts(this).size();
+        if (alertHistoryIndex < count - 1) {
+            alertHistoryIndex++;
+            updateVisibleStatus();
+        }
+    }
+
+    private void showNewerAlert() {
+        if (alertHistoryIndex > 0) {
+            alertHistoryIndex--;
+            updateVisibleStatus();
+        }
     }
 
     private void startRefresh() {
@@ -567,7 +651,6 @@ public final class MainActivity extends Activity {
         boolean paired = DeviceIdentity.isPaired(this);
         boolean notifications = notificationsAllowed();
         boolean listening = AlertServerService.isListening();
-        var status = getSharedPreferences("status", Context.MODE_PRIVATE);
         if (nextButton != null) {
             boolean enabled = setupStep == 0 ? notifications
                     : setupStep == 1 ? paired : paired && notifications;
@@ -614,17 +697,49 @@ public final class MainActivity extends Activity {
                     paired && notifications && listening ? INK : RED);
         }
         if (lastAlert != null) {
-            long lastTime = status.getLong("last_time", 0);
-            lastAlert.setText(lastTime == 0 ? "LAST ALERT\nNo completion received yet"
-                    : "LAST ALERT  ·  " + DateFormat.getTimeFormat(this).format(new Date(lastTime))
-                    + "\n" + status.getString("last_title", "Codex finished")
-                    + "\n" + status.getString("last_body", "Task completed."));
+            updateAlertHistory();
         }
         if (refreshButton != null) {
             refreshButton.setEnabled(!refreshing);
             refreshButton.setAlpha(refreshing ? 0.45f : 1f);
         }
         updateT3Controls();
+    }
+
+    private void updateAlertHistory() {
+        List<AlertStore.AlertRecord> history = AlertStore.recentAlerts(this);
+        if (history.isEmpty()) {
+            alertHistoryIndex = 0;
+            historyNewestEventId = "";
+            lastAlert.setText("LATEST ALERT\nNo completion received yet");
+            updateHistoryButton(olderAlertButton, false);
+            updateHistoryButton(newerAlertButton, false);
+            if (alertPosition != null) alertPosition.setText("0 of 5 cached");
+            return;
+        }
+
+        String newestEventId = history.get(0).eventId;
+        if (!newestEventId.equals(historyNewestEventId)) {
+            alertHistoryIndex = 0;
+            historyNewestEventId = newestEventId;
+        }
+        alertHistoryIndex = Math.max(0, Math.min(alertHistoryIndex, history.size() - 1));
+        AlertStore.AlertRecord alert = history.get(alertHistoryIndex);
+        String label = alertHistoryIndex == 0 ? "LATEST ALERT" : "PAST ALERT";
+        lastAlert.setText(label + "  ·  "
+                + DateFormat.getTimeFormat(this).format(new Date(alert.receivedAt))
+                + "\n" + alert.title + "\n" + alert.body);
+        if (alertPosition != null) {
+            alertPosition.setText((alertHistoryIndex + 1) + " of " + history.size());
+        }
+        updateHistoryButton(olderAlertButton, alertHistoryIndex < history.size() - 1);
+        updateHistoryButton(newerAlertButton, alertHistoryIndex > 0);
+    }
+
+    private void updateHistoryButton(ImageButton button, boolean enabled) {
+        if (button == null) return;
+        button.setEnabled(enabled);
+        button.setAlpha(enabled ? 1f : 0.38f);
     }
 
     private void updatePairingCard(boolean paired) {
@@ -717,7 +832,7 @@ public final class MainActivity extends Activity {
         Button button = baseButton(label, listener);
         button.setTextColor(Color.WHITE);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setBackgroundTintList(interactionColors(TEAL, TEAL_DARK));
+        button.setBackgroundTintList(interactionColors(TEAL, TEAL_PRESSED));
         return button;
     }
 
@@ -725,7 +840,7 @@ public final class MainActivity extends Activity {
         Button button = baseButton(label, listener);
         button.setTextColor(TEAL_DARK);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setBackgroundTintList(interactionColors(Color.WHITE, TEAL_PALE));
+        button.setBackgroundTintList(interactionColors(SURFACE, TEAL_PALE));
         return button;
     }
 
@@ -739,7 +854,7 @@ public final class MainActivity extends Activity {
     private Button destructiveButton(String label, View.OnClickListener listener) {
         Button button = baseButton(label, listener);
         button.setTextColor(RED);
-        button.setBackgroundTintList(interactionColors(RED_PALE, Color.rgb(250, 211, 211)));
+        button.setBackgroundTintList(interactionColors(RED_PALE, RED_PRESSED));
         return button;
     }
 
@@ -778,10 +893,68 @@ public final class MainActivity extends Activity {
         return view;
     }
 
+    private void applyPalette() {
+        if (darkMode) {
+            INK = Color.rgb(230, 242, 239);
+            MUTED = Color.rgb(179, 195, 191);
+            TEAL = Color.rgb(15, 118, 110);
+            TEAL_DARK = Color.rgb(94, 234, 212);
+            TEAL_PRESSED = Color.rgb(17, 94, 89);
+            TEAL_PALE = Color.rgb(24, 67, 61);
+            GREEN = Color.rgb(110, 231, 183);
+            GREEN_PALE = Color.rgb(23, 60, 47);
+            AMBER = Color.rgb(251, 191, 36);
+            AMBER_PALE = Color.rgb(66, 47, 10);
+            RED = Color.rgb(252, 165, 165);
+            RED_PALE = Color.rgb(71, 31, 37);
+            RED_PRESSED = Color.rgb(91, 40, 47);
+            BACKGROUND = Color.rgb(15, 23, 21);
+            SURFACE = Color.rgb(24, 35, 33);
+            SURFACE_MUTED = Color.rgb(32, 45, 42);
+            DIVIDER = Color.rgb(52, 67, 63);
+        } else {
+            INK = Color.rgb(16, 32, 29);
+            MUTED = Color.rgb(82, 100, 95);
+            TEAL = Color.rgb(8, 127, 112);
+            TEAL_DARK = Color.rgb(5, 98, 86);
+            TEAL_PRESSED = Color.rgb(5, 98, 86);
+            TEAL_PALE = Color.rgb(221, 244, 239);
+            GREEN = Color.rgb(20, 125, 85);
+            GREEN_PALE = Color.rgb(224, 246, 235);
+            AMBER = Color.rgb(151, 91, 8);
+            AMBER_PALE = Color.rgb(255, 242, 211);
+            RED = Color.rgb(178, 48, 48);
+            RED_PALE = Color.rgb(255, 231, 231);
+            RED_PRESSED = Color.rgb(250, 211, 211);
+            BACKGROUND = Color.rgb(244, 247, 246);
+            SURFACE = Color.WHITE;
+            SURFACE_MUTED = Color.rgb(236, 241, 239);
+            DIVIDER = Color.rgb(218, 226, 223);
+        }
+    }
+
+    private void applySystemBars() {
+        getWindow().setStatusBarColor(BACKGROUND);
+        getWindow().setNavigationBarColor(BACKGROUND);
+        if (Build.VERSION.SDK_INT >= 28) {
+            getWindow().setNavigationBarDividerColor(DIVIDER);
+        }
+        int appearance = darkMode ? 0
+                : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        getWindow().getDecorView().setSystemUiVisibility(appearance);
+    }
+
     private GradientDrawable rounded(int color, int radiusDp) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
         drawable.setCornerRadius(dp(radiusDp));
+        return drawable;
+    }
+
+    private StateListDrawable interactiveRounded(int normal, int pressed, int radiusDp) {
+        StateListDrawable drawable = new StateListDrawable();
+        drawable.addState(new int[]{android.R.attr.state_pressed}, rounded(pressed, radiusDp));
+        drawable.addState(new int[]{}, rounded(normal, radiusDp));
         return drawable;
     }
 

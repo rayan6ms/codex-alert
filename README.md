@@ -1,8 +1,8 @@
 # Codex Alert
 
-Receive a clean Linux desktop and Android notification when Codex finishes. It
-works with every authenticated local Codex account and sends directly over your
-LAN; there is no cloud relay.
+Receive a clean Linux desktop and Android notification when Codex finishes or
+fails. It works with every authenticated local Codex account and sends directly
+over your LAN; there is no cloud relay.
 
 ## 1. Install on the computer
 
@@ -54,6 +54,21 @@ computer pairing are working, along with the most recently received alert.
 The dashboard's READY indicator is based on the receiver's live listening
 socket, not a stale saved status. Use the refresh icon beside it to restart
 the receiver check; the control is disabled while that check is in progress.
+Use the theme button at the right side of the app header to switch between
+light and dark mode. The dashboard keeps the five most recent Codex
+alerts on-device, with previous and next buttons below the alert card.
+
+Codex Alert ignores ephemeral `codex exec` helpers used by T3 Code to generate
+thread titles and other metadata. Completion IDs are claimed before either
+desktop or phone delivery starts, while both receivers retain their own
+idempotency checks as an additional safeguard against duplicate Stop hooks.
+Terminal task failures are detected from Codex's append-only rollout events,
+because Codex does not currently run Stop hooks for failed turns. The watcher
+alerts only on a turn-level `task_complete` error: failed commands that Codex
+can recover from, cancelled turns, subagents, and ephemeral metadata jobs do
+not trigger an alert. It follows new data through Linux inotify and keeps
+durable byte offsets, so it is immediate without repeatedly reading session
+history or replaying old failures after an install or restart.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses

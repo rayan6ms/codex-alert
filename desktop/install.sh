@@ -39,7 +39,7 @@ install -d -m 700 \
     "${icon_dir}" \
     "${applications_dir}"
 
-for program in codex-alert codex-notify-stop codex-notify-stop-desktop codex-phone-deliver; do
+for program in codex-alert codex-alert-failure-watch codex-notify-stop codex-notify-stop-desktop codex-phone-deliver; do
     install -m 700 "${project_dir}/desktop/${program}" "${lib_dir}/${program}"
     ln -sfn "${lib_dir}/${program}" "${bin_dir}/${program}"
 done
@@ -59,8 +59,12 @@ if [[ "${systemd_user}" == true ]]; then
         "${systemd_dir}/codex-alert-hooks.service"
     install -m 600 "${project_dir}/desktop/codex-alert-hooks.timer" \
         "${systemd_dir}/codex-alert-hooks.timer"
+    install -m 600 "${project_dir}/desktop/codex-alert-failure-watch.service" \
+        "${systemd_dir}/codex-alert-failure-watch.service"
     systemctl --user daemon-reload
     systemctl --user enable --now codex-alert-hooks.timer >/dev/null
+    systemctl --user enable codex-alert-failure-watch.service >/dev/null
+    systemctl --user restart codex-alert-failure-watch.service
     account_detection="systemd user timer"
 else
     install -d -m 700 "${autostart_dir}"
