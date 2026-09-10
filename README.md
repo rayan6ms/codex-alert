@@ -69,6 +69,15 @@ can recover from, cancelled turns, subagents, and ephemeral metadata jobs do
 not trigger an alert. It follows new data through Linux inotify and keeps
 durable byte offsets, so it is immediate without repeatedly reading session
 history or replaying old failures after an install or restart.
+On every watcher start, existing files are baselined at their current end;
+events from while the watcher was offline are intentionally skipped. Replaced
+or truncated logs are also baselined, and events older than two minutes are
+discarded to prevent stale notification bursts.
+
+Explicit Codex `request_user_input` and `request_user_input_async` tool calls
+send a “Codex needs input” notification with the question text. Each request
+has its own notification ID, separate from the turn's completion or failure.
+Ordinary questions written in assistant prose do not trigger this alert.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses

@@ -40,6 +40,15 @@ MAX_LOG_BYTES = 1024 * 1024
 MAX_RELEVANT_RECORD_BYTES = 8 * 1024 * 1024
 RECONCILE_SECONDS = 60
 ACCOUNT_RESCAN_SECONDS = 5 * 60
+STARTED_AT = time.time()
+
+
+def live_record(row):
+    try:
+        stamp = datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00')).timestamp()
+        return stamp >= STARTED_AT and time.time() - stamp < 120
+    except (KeyError, TypeError, ValueError):
+        return False
 
 IN_MODIFY = 0x00000002
 IN_CLOSE_WRITE = 0x00000008
@@ -335,6 +344,26 @@ def handle_record(context, row, dispatch):
         context["model_turn_id"] = str(payload.get("turn_id") or "")
         return True
 
+    if row_type == "response_item" and payload.get("type") == "function_call" and payload.get("name") in ("request_user_input", "request_user_input_async"):
+        if ignored_session(context):
+            return True
+        try:
+            arguments = json.loads(payload.get("arguments") or "{}")
+            questions = arguments.get("questions", [])
+            message = "\n".join(str(q.get("question") or q.get("title") or "") for q in questions if isinstance(q, dict))
+        except (ValueError, AttributeError, TypeError):
+            return True
+        request_id = payload.get("call_id")
+        if not request_id or not context.get("session_id") or not questions:
+            return True
+        account = context.get("account") or "codex"
+        if context.get("originator") == "t3code_desktop":
+            account = account_for_session(context["session_id"], account)
+        return bool(dispatch({"session_id": context["session_id"],
+            "turn_id": context.get("model_turn_id", ""), "request_id": request_id,
+            "cwd": context.get("cwd", ""), "model": context.get("model", ""),
+            "input_message": compact(message) or "Codex needs your input."}, account))
+
     if row_type != "event_msg" or payload.get("type") != "task_complete":
         return True
     error = payload.get("error")
@@ -369,7 +398,7 @@ def handle_record(context, row, dispatch):
 def dispatch_failure(payload, account):
     try:
         result = subprocess.run(
-            [str(NOTIFIER), "--failure", "--account", account],
+            [str(NOTIFIER), "--waiting-input" if payload.get("request_id") else "--failure", "--account", account],
             input=json.dumps(payload, ensure_ascii=False),
             text=True,
             stdout=subprocess.DEVNULL,
@@ -440,6 +469,13 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
         return False
 
     context = load_context(connection, path)
+    if context is not None and (
+        context["device"] != status.st_dev or context["inode"] != status.st_ino
+        or status.st_size < context["offset"]
+    ):
+        baseline_file(connection, path, account)
+        connection.commit()
+        return True
     if (
         context is None
         or context["device"] != status.st_dev
@@ -460,9 +496,15 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
             stream.seek(committed)
             while True:
                 start = stream.tell()
-                raw = stream.readline()
+                raw = stream.readline(MAX_RELEVANT_RECORD_BYTES + 1)
                 if not raw:
                     break
+                if len(raw) > MAX_RELEVANT_RECORD_BYTES:
+                    while raw and not raw.endswith(b"\n"):
+                        raw = stream.readline(MAX_RELEVANT_RECORD_BYTES + 1)
+                    committed = stream.tell()
+                    changed = True
+                    continue
                 if not raw.endswith(b"\n"):
                     break
                 # Most rollout records are model content or tool traffic and
@@ -470,7 +512,7 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
                 # three small record families below affect terminal alerts.
                 if not any(
                     marker in raw
-                    for marker in (b"session_meta", b"turn_context", b"task_complete")
+                    for marker in (b"session_meta", b"turn_context", b"task_complete", b"request_user_input")
                 ):
                     committed = stream.tell()
                     changed = True
@@ -488,7 +530,8 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
                     committed = stream.tell()
                     changed = True
                     continue
-                if not handle_record(context, row, dispatch):
+                deliver = dispatch if live_record(row) else lambda _payload, _account: True
+                if not handle_record(context, row, deliver):
                     break
                 committed = stream.tell()
                 changed = True
@@ -510,9 +553,9 @@ def initialized(connection):
     return row is not None and row[0] == "1"
 
 
-def initialize(connection, roots):
+def initialize(connection, roots, force=False):
     """Baseline existing logs so installation never replays old failures."""
-    if initialized(connection):
+    if initialized(connection) and not force:
         return False
     count = 0
     with connection:
@@ -607,13 +650,14 @@ def watch(connection, roots):
     def stop(_signum, _frame):
         nonlocal stopping
         stopping = True
+        raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
         for root, _account in roots:
             monitor.add_tree(root)
-        initialize(connection, roots)
+        initialize(connection, roots, force=True)
         if initialized(connection):
             reconcile(connection, roots)
 
@@ -628,7 +672,7 @@ def watch(connection, roots):
         )
         while not stopping:
             timeout = max(0, min(next_reconcile, next_account_scan) - time.monotonic())
-            poller.poll(round(timeout * 1000))
+            poller.poll(min(1000, round(timeout * 1000)))
             changed = False
             overflow = False
             accounts = {str(root): account for root, account in roots}
@@ -704,7 +748,7 @@ def main():
         roots = session_roots()
         with connect_db() as connection:
             if args.once:
-                initialize(connection, roots)
+                initialize(connection, roots, force=True)
                 reconcile(connection, roots)
                 return 0
             watch(connection, roots)

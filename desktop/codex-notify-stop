@@ -256,6 +256,7 @@ def launch(command):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--account", default="codex")
+    parser.add_argument("--waiting-input", action="store_true")
     parser.add_argument(
         "--failure", action="store_true",
         help="dispatch a terminal task failure observed in the rollout log",
@@ -282,7 +283,10 @@ def main():
     cwd = str(payload.get("cwd") or os.getcwd())
     project = Path(cwd).name or cwd or "Codex"
     model = compact(payload.get("model"), 100)
-    if args.failure:
+    if args.waiting_input:
+        message = compact(markdown_to_plain_text(payload.get("input_message") or "Codex needs your input."))
+        title = f"Codex needs input · {project}"
+    elif args.failure:
         message = compact(markdown_to_plain_text(
             payload.get("error") or "The Codex task failed."
         ))
@@ -295,6 +299,11 @@ def main():
     details = account + (f" · {model}" if model else "")
     body = details + (f"\n{message}" if message else "")
     event_id = completion_id(payload, account)
+    if args.waiting_input:
+        request_id = str(payload.get("request_id") or "").strip()
+        if not request_id:
+            return 1
+        event_id = "input-" + hashlib.sha256(f"{account}\0{payload.get('session_id')}\0{request_id}".encode()).hexdigest()[:32]
     if not remember_dispatch(event_id):
         log({
             "event": "duplicate-terminal-event-ignored",

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 
@@ -34,6 +35,7 @@ def context():
 def row(payload_type, **payload):
     return {
         "type": "event_msg",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {"type": payload_type, **payload},
     }
 
@@ -220,7 +222,54 @@ class OffsetTests(unittest.TestCase):
                     lambda payload, account: calls.append(payload["error"]) or True,
                 )
 
-            self.assertEqual(calls, ["first", "second", "third"])
+            self.assertEqual(calls, ["first"])
+
+    def test_reboot_rebases_offsets_and_only_new_failures_alert(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rollout = root / "rollout.jsonl"
+            self.append(rollout, self.records())
+            connection = MODULE.connect_db(root / "state.sqlite3")
+            try:
+                MODULE.initialize(connection, [(root, "codex")], force=True)
+                connection.execute('UPDATE rollout_files SET device = -1, offset = 0')
+                connection.commit()
+                MODULE.initialize(connection, [(root, "codex")], force=True)
+                calls = []
+                deliver = lambda payload, account: calls.append(payload) or True
+                MODULE.process_file(connection, rollout, "codex", deliver)
+                self.assertEqual(calls, [])
+                self.append(rollout, [row('task_complete', turn_id='new', error={'message':'new failure'})])
+                MODULE.process_file(connection, rollout, "codex", deliver)
+                self.assertEqual(len(calls), 1)
+            finally:
+                connection.close()
+
+    def test_old_discovered_file_does_not_alert(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records = self.records()
+            records[-1]['timestamp'] = '2026-01-01T00:00:00Z'
+            rollout = root / 'old.jsonl'
+            self.append(rollout, records)
+            connection = MODULE.connect_db(root / 'state.sqlite3')
+            try:
+                calls = []
+                MODULE.process_file(connection, rollout, 'codex', lambda p,a: calls.append(p) or True)
+                self.assertEqual(calls, [])
+            finally:
+                connection.close()
+
+    def test_explicit_input_request(self):
+        calls = []
+        ctx = context()
+        ctx['originator'] = 'codex_cli'
+        request = {'type':'response_item', 'payload':{'type':'function_call',
+            'name':'request_user_input', 'call_id':'question-1',
+            'arguments':json.dumps({'questions':[{'question':'Which environment?'}]})}}
+        MODULE.handle_record(ctx, request, lambda p,a: calls.append(p) or True)
+        self.assertEqual(calls[0]['request_id'], 'question-1')
+        self.assertEqual(calls[0]['input_message'], 'Which environment?')
 
 
 if __name__ == "__main__":
