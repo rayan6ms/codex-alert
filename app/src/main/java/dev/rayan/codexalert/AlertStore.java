@@ -136,7 +136,7 @@ final class AlertStore {
             if (lastTime > 0) {
                 history.add(new AlertRecord(
                         preferences.getString("last_event_id", ""),
-                        preferences.getString("last_title", "Codex finished"),
+                        preferences.getString("last_title", "Finished ✅"),
                         preferences.getString("last_body", "Task completed."),
                         lastTime
                 ));

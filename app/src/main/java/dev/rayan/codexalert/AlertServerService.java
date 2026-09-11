@@ -81,7 +81,7 @@ public final class AlertServerService extends Service {
             long now = System.currentTimeMillis();
             acceptAlert(
                     UUID.randomUUID().toString(),
-                    "Codex finished · local test",
+                    "Finished ✅ · local test",
                     "phone · Direct receiver test completed successfully.",
                     "on-device test",
                     "",
@@ -225,7 +225,7 @@ public final class AlertServerService extends Service {
             }
             JSONObject payload = new JSONObject(new String(request.body, StandardCharsets.UTF_8));
             String eventId = limited(payload.optString("id", ""), 128);
-            String title = limited(payload.optString("title", "Codex finished"), 240);
+            String title = limited(payload.optString("title", "Finished ✅"), 240);
             String body = limited(payload.optString("body", "Task completed."), 2400);
             String environmentId = limited(payload.optString("environment_id", ""), 128);
             String threadId = limited(payload.optString("thread_id", ""), 128);

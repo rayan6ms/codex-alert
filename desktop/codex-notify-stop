@@ -285,17 +285,17 @@ def main():
     model = compact(payload.get("model"), 100)
     if args.waiting_input:
         message = compact(markdown_to_plain_text(payload.get("input_message") or "Codex needs your input."))
-        title = f"Codex needs input · {project}"
+        title = f"Input ℹ️ · {project}"
     elif args.failure:
         message = compact(markdown_to_plain_text(
             payload.get("error") or "The Codex task failed."
         ))
-        title = f"Codex failed · {project}"
+        title = f"Failed ❌ · {project}"
     else:
         message = compact(markdown_to_plain_text(
             payload.get("last_assistant_message") or "Task completed."
         ))
-        title = f"Codex finished · {project}"
+        title = f"Finished ✅ · {project}"
     details = account + (f" · {model}" if model else "")
     body = details + (f"\n{message}" if message else "")
     event_id = completion_id(payload, account)

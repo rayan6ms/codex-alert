@@ -43,7 +43,7 @@ class PhoneDeliveryTests(unittest.TestCase):
 
     def args(self, event_id):
         return Namespace(
-            title="Codex finished · test",
+            title="Finished ✅ · test",
             body="codex2 · Done",
             account="codex2",
             project="test",

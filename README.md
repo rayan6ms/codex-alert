@@ -75,7 +75,7 @@ or truncated logs are also baselined, and events older than two minutes are
 discarded to prevent stale notification bursts.
 
 Explicit Codex `request_user_input` and `request_user_input_async` tool calls
-send a “Codex needs input” notification with the question text. Each request
+send an “Input ℹ️” notification with the question text. Each request
 has its own notification ID, separate from the turn's completion or failure.
 Ordinary questions written in assistant prose do not trigger this alert.
 

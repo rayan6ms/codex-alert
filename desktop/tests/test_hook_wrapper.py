@@ -114,7 +114,7 @@ class HookWrapperTests(unittest.TestCase):
 
         self.assertEqual(launch.call_count, 2)
         self.assertTrue(any(
-            value.startswith("Codex failed")
+            value.startswith("Failed ❌")
             for value in launch.call_args_list[0].args[0]
         ))
 
