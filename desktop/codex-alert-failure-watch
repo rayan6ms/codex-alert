@@ -1,13 +1,6 @@
 #!/usr/bin/python3
 
-"""Watch Codex rollout logs for terminal turn failures.
-
-Codex currently invokes Stop hooks only for successful turns. Its rollout log,
-however, records every terminal turn as ``task_complete`` and includes an
-``error`` object when the turn failed. This watcher follows only newly appended
-records and forwards those terminal failures through the same notification
-wrapper used by the Stop hook.
-"""
+"""Watch for new input requests and terminal failures in Codex and T3 Code."""
 
 import argparse
 import ctypes
@@ -26,7 +19,18 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from codex_alert_common import STATE_DIR, atomic_json, codex_homes
+from codex_alert_common import (
+    STATE_DIR,
+    T3_CURRENT_DB,
+    T3_LEGACY_DB,
+    T3_SETTINGS_FILE,
+    atomic_json,
+    codex_homes,
+    open_t3_db,
+    t3_account,
+    t3_codex_session,
+    t3_enabled,
+)
 
 
 NOTIFIER = Path.home() / ".local/bin/codex-notify-stop"
@@ -34,21 +38,22 @@ DB_FILE = STATE_DIR / "failure-watch.sqlite3"
 LOCK_FILE = STATE_DIR / "failure-watch.lock"
 STATUS_FILE = STATE_DIR / "failure-watch-status.json"
 LOG_FILE = STATE_DIR / "failure-watch.log"
-T3_STATE_DB = Path.home() / ".t3/userdata/state.sqlite"
-T3_SETTINGS_FILE = Path.home() / ".t3/userdata/settings.json"
 MAX_LOG_BYTES = 1024 * 1024
 MAX_RELEVANT_RECORD_BYTES = 8 * 1024 * 1024
 RECONCILE_SECONDS = 60
 ACCOUNT_RESCAN_SECONDS = 5 * 60
+T3_POLL_SECONDS = 2
+T3_BATCH_SIZE = 1000
 STARTED_AT = time.time()
-
-
-def live_record(row):
-    try:
-        stamp = datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00')).timestamp()
-        return stamp >= STARTED_AT and time.time() - stamp < 120
-    except (KeyError, TypeError, ValueError):
-        return False
+INPUT_TOOLS = {
+    "request_user_input",
+    "request_user_input_async",
+    "send_message_to_user_async",
+}
+ROLLOUT_MARKERS = (
+    b"session_meta", b"turn_context", b"task_complete",
+    *(name.encode("ascii") for name in sorted(INPUT_TOOLS)),
+)
 
 IN_MODIFY = 0x00000002
 IN_CLOSE_WRITE = 0x00000008
@@ -68,6 +73,16 @@ WATCH_MASK = (
     | IN_MOVE_SELF
 )
 EVENT_HEADER = struct.Struct("iIII")
+
+
+def live_timestamp(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return stamp >= STARTED_AT and time.time() - stamp < 120
+    except (OSError, OverflowError, ValueError):
+        return False
 
 
 def clean_environment():
@@ -264,47 +279,12 @@ def ignored_session(context):
 
 def account_for_session(session_id, fallback, state_db=None, settings_file=None):
     """Resolve T3's provider instance when shadow homes share one log tree."""
-    database = T3_STATE_DB if state_db is None else Path(state_db)
-    settings_path = T3_SETTINGS_FILE if settings_file is None else Path(settings_file)
-    if not database.is_file() or not settings_path.is_file():
-        return fallback
-    try:
-        uri = database.resolve().as_uri() + "?mode=ro"
-        instance_id = None
-        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
-            rows = connection.execute(
-                """
-                SELECT provider_instance_id, resume_cursor_json
-                FROM provider_session_runtime
-                WHERE lower(provider_name) = 'codex'
-                """
-            )
-            for candidate, cursor_json in rows:
-                try:
-                    cursor = json.loads(cursor_json or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if cursor.get("threadId") == session_id:
-                    instance_id = str(candidate or "codex")
-                    break
-        if not instance_id:
-            return fallback
-        settings_value = json.loads(settings_path.read_text(encoding="utf-8"))
-        instance = settings_value.get("providerInstances", {}).get(instance_id, {})
-        config = instance.get("config", {}) if isinstance(instance, dict) else {}
-        configured_home = config.get("shadowHomePath") or config.get("homePath")
-        if configured_home:
-            name = Path(str(configured_home)).name.lstrip(".")
-            if name:
-                return name
-        if instance_id == "codex":
-            return "codex"
-        prefix = "codex_account"
-        if instance_id.startswith(prefix) and instance_id[len(prefix):].isdigit():
-            return "codex" + instance_id[len(prefix):]
-    except (AttributeError, OSError, sqlite3.Error, TypeError, ValueError):
-        pass
-    return fallback
+    match = t3_codex_session(
+        session_id,
+        current_db=T3_CURRENT_DB if state_db is None else None,
+        legacy_db=T3_LEGACY_DB if state_db is None else Path(state_db),
+    )
+    return t3_account(match[1], fallback, settings_file or T3_SETTINGS_FILE) if match else fallback
 
 
 def error_message(error):
@@ -316,8 +296,17 @@ def error_message(error):
     return compact(error)
 
 
+def question_message(questions):
+    if not isinstance(questions, list):
+        return ""
+    return compact("\n".join(
+        str(question.get("question") or question.get("title") or "")
+        for question in questions if isinstance(question, dict)
+    ))
+
+
 def handle_record(context, row, dispatch):
-    """Update file context and dispatch one true terminal failure if present."""
+    """Update rollout context and forward input requests or terminal failures."""
     if not isinstance(row, dict):
         return True
     payload = row.get("payload")
@@ -344,88 +333,99 @@ def handle_record(context, row, dispatch):
         context["model_turn_id"] = str(payload.get("turn_id") or "")
         return True
 
-    if row_type == "response_item" and payload.get("type") == "function_call" and payload.get("name") in ("request_user_input", "request_user_input_async"):
-        if ignored_session(context):
-            return True
+    kind = payload.get("type")
+    name = payload.get("name")
+    alert = {}
+    if (
+        row_type == "response_item" and kind == "function_call"
+        and isinstance(name, str) and name in INPUT_TOOLS
+    ):
+        arguments = payload.get("arguments")
         try:
-            arguments = json.loads(payload.get("arguments") or "{}")
-            questions = arguments.get("questions", [])
-            message = "\n".join(str(q.get("question") or q.get("title") or "") for q in questions if isinstance(q, dict))
-        except (ValueError, AttributeError, TypeError):
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+        except ValueError:
             return True
-        request_id = payload.get("call_id")
-        if not request_id or not context.get("session_id") or not questions:
+        if not isinstance(arguments, dict) or not payload.get("call_id"):
             return True
-        account = context.get("account") or "codex"
-        if context.get("originator") == "t3code_desktop":
-            account = account_for_session(context["session_id"], account)
-        return bool(dispatch({"session_id": context["session_id"],
-            "turn_id": context.get("model_turn_id", ""), "request_id": request_id,
-            "cwd": context.get("cwd", ""), "model": context.get("model", ""),
-            "input_message": compact(message) or "Codex needs your input."}, account))
-
-    if row_type != "event_msg" or payload.get("type") != "task_complete":
-        return True
-    error = payload.get("error")
-    if not error or ignored_session(context):
+        if name == "send_message_to_user_async":
+            message = compact(arguments.get("message"))
+        else:
+            questions = arguments.get("questions")
+            if not isinstance(questions, list) or not questions:
+                return True
+            message = question_message(questions)
+        turn_id = context.get("model_turn_id", "")
+        alert = {
+            "request_id": payload["call_id"],
+            "input_message": message or "Codex needs your input.",
+        }
+    elif row_type == "event_msg" and kind == "task_complete":
+        status = payload.get("status")
+        error = payload.get("error")
+        if status in ("interrupted", "cancelled", "canceled") or (not error and status != "failed"):
+            return True
+        turn_id = str(payload.get("turn_id") or "").strip()
+        if not turn_id:
+            log(event="failure-missing-identity", path=context.get("path"))
+            return True
+        alert = {"error": error_message(error) or "The Codex task failed."}
+    else:
         return True
 
     session_id = str(context.get("session_id") or "").strip()
-    turn_id = str(payload.get("turn_id") or "").strip()
-    if not session_id or not turn_id:
-        log(
-            event="failure-missing-identity",
-            path=context.get("path"),
-            session_id=session_id,
-            turn_id=turn_id,
-        )
+    if not session_id or ignored_session(context):
         return True
 
     model = context.get("model") if context.get("model_turn_id") == turn_id else ""
-    failure = {
+    alert.update({
         "session_id": session_id,
         "turn_id": turn_id,
         "cwd": context.get("cwd") or "",
         "model": model,
-        "error": error_message(error) or "The Codex task failed.",
-    }
+    })
     account = context.get("account") or "codex"
-    if context.get("originator") == "t3code_desktop":
+    if context.get("originator") in ("t3code_desktop", "T3 Code"):
         account = account_for_session(session_id, account)
-    return bool(dispatch(failure, account))
+    return bool(dispatch(alert, account))
 
 
 def dispatch_failure(payload, account):
+    waiting_input = bool(payload.get("request_id"))
+    outcome = "input" if waiting_input else "failure"
+    option = "--waiting-input" if waiting_input else "--failure"
+    environment = clean_environment()
+    environment.pop("CODEX_HOME", None)
     try:
         result = subprocess.run(
-            [str(NOTIFIER), "--waiting-input" if payload.get("request_id") else "--failure", "--account", account],
+            [str(NOTIFIER), option, "--account", account],
             input=json.dumps(payload, ensure_ascii=False),
             text=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env=clean_environment(),
+            env=environment,
             check=False,
             timeout=8,
         )
         if result.returncode == 0:
             log(
-                event="failure-forwarded",
+                event=f"{outcome}-forwarded",
                 account=account,
                 session_id=payload.get("session_id"),
                 turn_id=payload.get("turn_id"),
             )
             save_status(
-                last_failure_at=time.time(),
+                **{f"last_{outcome}_at": time.time()},
                 last_session_id=payload.get("session_id"),
                 last_turn_id=payload.get("turn_id"),
                 last_error="",
             )
             return True
-        log(event="failure-forward-failed", returncode=result.returncode,
+        log(event=f"{outcome}-forward-failed", returncode=result.returncode,
             error=compact(result.stderr, 500))
-    except Exception as exc:
-        log(event="failure-forward-failed", error=repr(exc))
-    save_status(last_error="Could not forward a Codex failure notification")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(event=f"{outcome}-forward-failed", error=repr(exc))
+    save_status(last_error=f"Could not forward a Codex {outcome} notification")
     return False
 
 
@@ -507,19 +507,8 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
                     continue
                 if not raw.endswith(b"\n"):
                     break
-                # Most rollout records are model content or tool traffic and
-                # can be very large. Avoid decoding them altogether; only the
-                # three small record families below affect terminal alerts.
-                if not any(
-                    marker in raw
-                    for marker in (b"session_meta", b"turn_context", b"task_complete", b"request_user_input")
-                ):
-                    committed = stream.tell()
-                    changed = True
-                    continue
-                if len(raw) > MAX_RELEVANT_RECORD_BYTES:
-                    log(event="oversized-rollout-record-ignored", path=str(path),
-                        offset=start, bytes=len(raw))
+                # Skip model content and tool traffic unrelated to alerts.
+                if not any(marker in raw for marker in ROLLOUT_MARKERS):
                     committed = stream.tell()
                     changed = True
                     continue
@@ -530,7 +519,14 @@ def process_file(connection, path, account, dispatch=dispatch_failure):
                     committed = stream.tell()
                     changed = True
                     continue
-                deliver = dispatch if live_record(row) else lambda _payload, _account: True
+                if not isinstance(row, dict):
+                    committed = stream.tell()
+                    changed = True
+                    continue
+                deliver = (
+                    dispatch if live_timestamp(row.get("timestamp"))
+                    else lambda _payload, _account: True
+                )
                 if not handle_record(context, row, deliver):
                     break
                 committed = stream.tell()
@@ -586,6 +582,149 @@ def reconcile(connection, roots, dispatch=dispatch_failure):
                 "DELETE FROM rollout_files WHERE path = ?",
                 ((path,) for path in missing),
             )
+
+
+def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
+    if event_type == "run.updated":
+        if event.get("delegatedTaskId") or not live_timestamp(event.get("completedAt") or occurred_at):
+            return None
+        failure = connection.execute(
+            """
+            SELECT provider_turn_id, json_extract(payload_json, '$.failure.message')
+            FROM orchestration_v2_projection_turn_items
+            WHERE thread_id = ? AND run_id = ? AND node_id = ?
+              AND type = 'error' AND status = 'failed'
+            ORDER BY updated_at DESC, ordinal DESC, turn_item_id DESC LIMIT 1
+            """,
+            (thread_id, event["id"], event.get("rootNodeId")),
+        ).fetchone()
+        turn_id, message = failure or (None, None)
+        alert = {"error": compact(message) or "The T3 Code run failed."}
+        fallback_turn_id = event["id"]
+    else:
+        if not live_timestamp(event.get("startedAt") or occurred_at):
+            return None
+        pending = connection.execute(
+            """
+            SELECT 1 FROM orchestration_v2_projection_turn_items
+            WHERE turn_item_id = ? AND status IN ('pending', 'waiting')
+            """,
+            (event["id"],),
+        ).fetchone()
+        if not pending:
+            return None
+        is_approval = event["type"] == "approval_request"
+        native_item = event.get("nativeItemRef") or {}
+        native_request_id = None if is_approval else native_item.get("nativeId")
+        request_id = native_request_id or event.get("requestId") or event["id"]
+        message = question_message(event.get("questions")) or compact(event.get("prompt"))
+        fallback_message = (
+            "T3 Code needs your approval." if is_approval else "T3 Code needs your input."
+        )
+        alert = {"request_id": request_id, "input_message": message or fallback_message}
+        turn_id = event.get("providerTurnId")
+        fallback_turn_id = turn_id or ""
+
+    context = connection.execute(
+        """
+        SELECT json_extract(provider_thread.payload_json, '$.nativeThreadRef.nativeId'),
+               json_extract(turn.payload_json, '$.nativeTurnRef.nativeId'),
+               COALESCE(json_extract(thread.payload_json, '$.worktreePath'), project.workspace_root),
+               COALESCE(json_extract(turn.payload_json, '$.model'),
+                        json_extract(run.payload_json, '$.modelSelection.model')),
+               COALESCE(run.provider_instance_id, provider_thread.provider_instance_id,
+                        thread.provider_instance_id),
+               COALESCE(provider_thread.driver, thread.default_provider)
+        FROM orchestration_v2_projection_threads AS thread
+        LEFT JOIN projection_projects AS project ON project.project_id = thread.project_id
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = ?
+        LEFT JOIN orchestration_v2_projection_provider_turns AS turn ON turn.provider_turn_id = ?
+        LEFT JOIN orchestration_v2_projection_provider_threads AS provider_thread
+          ON provider_thread.provider_thread_id = COALESCE(
+              turn.provider_thread_id, ?, thread.active_provider_thread_id
+          )
+        WHERE thread.thread_id = ? AND thread.deleted_at IS NULL
+          AND json_extract(thread.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+        """,
+        (
+            event["id"] if event_type == "run.updated" else event.get("runId"),
+            turn_id, event.get("providerThreadId"), thread_id,
+        ),
+    ).fetchone()
+    if not context:
+        return None
+
+    session_id, native_turn_id, cwd, model, instance_id, driver = context
+    alert.update(
+        session_id=session_id or thread_id,
+        turn_id=native_turn_id or fallback_turn_id,
+        t3_thread_id=thread_id,
+        cwd=cwd or "",
+        model=model or "",
+    )
+    account = t3_account(instance_id, driver or "codex", T3_SETTINGS_FILE)
+    return alert, account
+
+
+class T3Events:
+    """Read new T3 events in sequence without writing to its database."""
+
+    def __init__(self):
+        self.identity = None
+        self.sequence = 0
+
+    def poll(self, path, dispatch=dispatch_failure):
+        try:
+            status = path.stat()
+            identity = (status.st_dev, status.st_ino)
+            with closing(open_t3_db(path)) as connection:
+                if self.identity != identity:
+                    self.sequence = connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events"
+                    ).fetchone()[0]
+                    self.identity = identity
+                    return
+                boundary = connection.execute(
+                    """
+                    SELECT COALESCE(
+                        (SELECT sequence FROM orchestration_events WHERE sequence > ?
+                         ORDER BY sequence LIMIT 1 OFFSET ?),
+                        (SELECT MAX(sequence) FROM orchestration_events)
+                    )
+                    """,
+                    (self.sequence, T3_BATCH_SIZE - 1),
+                ).fetchone()[0]
+                if boundary is None or boundary <= self.sequence:
+                    return
+                alerts = []
+                for sequence, thread_id, stamp, kind, payload in connection.execute(
+                    """
+                    SELECT sequence, stream_id, occurred_at, event_type, payload_json
+                    FROM orchestration_events
+                    WHERE sequence > ? AND sequence <= ? AND aggregate_kind = 'thread'
+                      AND CASE event_type
+                          WHEN 'run.updated' THEN json_extract(payload_json, '$.status') = 'failed'
+                          WHEN 'turn-item.updated' THEN
+                            json_extract(payload_json, '$.type') IN ('user_input_request', 'approval_request')
+                            AND json_extract(payload_json, '$.status') IN ('pending', 'waiting')
+                          ELSE 0
+                      END
+                    ORDER BY sequence
+                    """,
+                    (self.sequence, boundary),
+                ):
+                    if live_timestamp(stamp):
+                        alert = t3_event_alert(connection, thread_id, stamp, kind, json.loads(payload))
+                        if alert:
+                            alerts.append((sequence, alert))
+        except (OSError, sqlite3.Error):
+            return
+
+        for sequence, alert in alerts:
+            if not dispatch(*alert):
+                self.sequence = sequence - 1
+                return
+        self.sequence = boundary
 
 
 class Inotify:
@@ -655,6 +794,9 @@ def watch(connection, roots):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
+        t3_events = T3Events()
+        if t3_enabled():
+            t3_events.poll(T3_CURRENT_DB)
         for root, _account in roots:
             monitor.add_tree(root)
         initialize(connection, roots, force=True)
@@ -663,6 +805,7 @@ def watch(connection, roots):
 
         next_reconcile = time.monotonic() + RECONCILE_SECONDS
         next_account_scan = time.monotonic() + ACCOUNT_RESCAN_SECONDS
+        next_t3_poll = time.monotonic()
         save_status(
             running=True,
             pid=os.getpid(),
@@ -671,7 +814,7 @@ def watch(connection, roots):
             last_error="",
         )
         while not stopping:
-            timeout = max(0, min(next_reconcile, next_account_scan) - time.monotonic())
+            timeout = max(0, min(next_reconcile, next_account_scan, next_t3_poll) - time.monotonic())
             poller.poll(min(1000, round(timeout * 1000)))
             changed = False
             overflow = False
@@ -705,6 +848,12 @@ def watch(connection, roots):
                     changed |= process_file(connection, candidate, account)
 
             now = time.monotonic()
+            if now >= next_t3_poll:
+                if t3_enabled():
+                    t3_events.poll(T3_CURRENT_DB)
+                else:
+                    t3_events.identity = None
+                next_t3_poll = now + T3_POLL_SECONDS
             if now >= next_account_scan:
                 updated_roots = session_roots()
                 known = {str(root) for root, _account in roots}

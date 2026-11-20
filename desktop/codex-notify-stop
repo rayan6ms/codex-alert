@@ -7,13 +7,18 @@ import html
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
-from contextlib import closing
 from pathlib import Path
 
-from codex_alert_common import phone_configured, t3_enabled
+from codex_alert_common import (
+    T3_CURRENT_DB,
+    T3_LEGACY_DB,
+    T3_STATE_DIR,
+    phone_configured,
+    t3_codex_session,
+    t3_enabled,
+)
 
 
 HOME = Path.home()
@@ -25,9 +30,7 @@ LOG_LOCK_FILE = STATE_DIR / "hook-wrapper-log.lock"
 RECENT_EVENTS_FILE = STATE_DIR / "hook-wrapper-recent-events"
 EVENT_LOCK_FILE = STATE_DIR / "hook-wrapper-events.lock"
 MAX_LOG_BYTES = 1024 * 1024
-T3_STATE_DIR = HOME / ".t3/userdata"
 T3_ENVIRONMENT_ID_FILE = T3_STATE_DIR / "environment-id"
-T3_STATE_DB = T3_STATE_DIR / "state.sqlite"
 
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 MARKDOWN_LINK = re.compile(r"!?\[([^]\n]*)\]\((?:\\.|[^)\n])*\)")
@@ -188,37 +191,20 @@ def t3_thread_target(payload):
     """Map Codex's provider thread id to T3's environment-scoped thread id."""
     if not t3_enabled():
         return None
-    provider_thread_id = str(payload.get("session_id") or "").strip()
-    if not provider_thread_id or not T3_ENVIRONMENT_ID_FILE.is_file() or not T3_STATE_DB.is_file():
-        return None
     try:
         environment_id = T3_ENVIRONMENT_ID_FILE.read_text(encoding="ascii").strip()
-        if not environment_id or len(environment_id) > 128:
-            return None
-        uri = T3_STATE_DB.resolve().as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
-            rows = connection.execute(
-                """
-                SELECT runtime.thread_id, runtime.resume_cursor_json
-                FROM provider_session_runtime AS runtime
-                LEFT JOIN projection_threads AS thread
-                  ON thread.thread_id = runtime.thread_id
-                WHERE lower(runtime.provider_name) = 'codex'
-                ORDER BY thread.updated_at DESC
-                """
-            )
-            for thread_id, cursor_json in rows:
-                try:
-                    cursor = json.loads(cursor_json or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if cursor.get("threadId") == provider_thread_id:
-                    thread_id = str(thread_id or "").strip()
-                    if thread_id and len(thread_id) <= 128:
-                        return environment_id, thread_id
-    except (OSError, sqlite3.Error):
-        pass
-    return None
+    except (OSError, UnicodeError):
+        return None
+    if not environment_id or len(environment_id) > 128:
+        return None
+
+    thread_id = str(payload.get("t3_thread_id") or "").strip()
+    provider_thread_id = str(payload.get("session_id") or "").strip()
+    if not thread_id and provider_thread_id:
+        match = t3_codex_session(provider_thread_id, T3_CURRENT_DB, T3_LEGACY_DB)
+        if match:
+            thread_id = str(match[0] or "").strip()
+    return (environment_id, thread_id) if thread_id and len(thread_id) <= 128 else None
 
 
 def log(record):
@@ -284,14 +270,17 @@ def main():
     project = Path(cwd).name or cwd or "Codex"
     model = compact(payload.get("model"), 100)
     if args.waiting_input:
+        outcome = "input"
         message = compact(markdown_to_plain_text(payload.get("input_message") or "Codex needs your input."))
         title = f"Input ℹ️ · {project}"
     elif args.failure:
+        outcome = "failure"
         message = compact(markdown_to_plain_text(
             payload.get("error") or "The Codex task failed."
         ))
         title = f"Failed ❌ · {project}"
     else:
+        outcome = "completion"
         message = compact(markdown_to_plain_text(
             payload.get("last_assistant_message") or "Task completed."
         ))
@@ -306,8 +295,8 @@ def main():
         event_id = "input-" + hashlib.sha256(f"{account}\0{payload.get('session_id')}\0{request_id}".encode()).hexdigest()[:32]
     if not remember_dispatch(event_id):
         log({
-            "event": "duplicate-terminal-event-ignored",
-            "outcome": "failure" if args.failure else "completion",
+            "event": "duplicate-event-ignored",
+            "outcome": outcome,
             "account": account,
             "session_id": payload.get("session_id"),
             "turn_id": payload.get("turn_id"),
@@ -328,7 +317,7 @@ def main():
     )
 
     log({
-        "event": "failure-dispatched" if args.failure else "completion-dispatched",
+        "event": f"{outcome}-dispatched",
         "account": account,
         "project": project,
         "model": model,

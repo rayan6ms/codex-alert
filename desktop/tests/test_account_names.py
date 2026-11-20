@@ -42,23 +42,18 @@ class AccountNameTests(unittest.TestCase):
             with closing(sqlite3.connect(database)) as connection:
                 connection.execute(
                     "CREATE TABLE provider_session_runtime "
-                    "(thread_id TEXT, provider_name TEXT, resume_cursor_json TEXT)"
+                    "(thread_id TEXT, provider_name TEXT, provider_instance_id TEXT, "
+                    "resume_cursor_json TEXT, last_seen_at TEXT)"
                 )
                 connection.execute(
-                    "CREATE TABLE projection_threads (thread_id TEXT, updated_at TEXT)"
-                )
-                connection.execute(
-                    "INSERT INTO projection_threads VALUES (?, ?)",
-                    ("t3-thread-1", "2026-08-21T00:00:00Z"),
-                )
-                connection.execute(
-                    "INSERT INTO provider_session_runtime VALUES (?, ?, ?)",
-                    ("t3-thread-1", "codex", '{"threadId":"codex-session-1"}'),
+                    "INSERT INTO provider_session_runtime VALUES (?, ?, ?, ?, ?)",
+                    ("t3-thread-1", "codex", "codex", '{"threadId":"codex-session-1"}', "2026"),
                 )
                 connection.commit()
             with (
                 patch.object(MODULE, "T3_ENVIRONMENT_ID_FILE", environment_file),
-                patch.object(MODULE, "T3_STATE_DB", database),
+                patch.object(MODULE, "T3_CURRENT_DB", state / "missing.sqlite"),
+                patch.object(MODULE, "T3_LEGACY_DB", database),
                 patch.object(MODULE, "t3_enabled", return_value=True),
             ):
                 self.assertEqual(
@@ -66,6 +61,38 @@ class AccountNameTests(unittest.TestCase):
                     ("environment-1", "t3-thread-1"),
                 )
                 self.assertIsNone(MODULE.t3_thread_target({"session_id": "missing"}))
+
+    def test_t3_thread_target_uses_current_database_or_explicit_thread(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            environment_file = state / "environment-id"
+            database = state / "statev2.sqlite"
+            environment_file.write_text("environment-1\n", encoding="ascii")
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE orchestration_v2_projection_provider_threads "
+                    "(thread_id TEXT, driver TEXT, provider_instance_id TEXT, "
+                    "payload_json TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?, ?, ?)",
+                    ("t3-thread-1", "codex", "codex2",
+                     '{"nativeThreadRef":{"nativeId":"codex-session-1"}}', "2026"),
+                )
+            with (
+                patch.object(MODULE, "T3_ENVIRONMENT_ID_FILE", environment_file),
+                patch.object(MODULE, "T3_CURRENT_DB", database),
+                patch.object(MODULE, "T3_LEGACY_DB", state / "missing.sqlite"),
+                patch.object(MODULE, "t3_enabled", return_value=True),
+            ):
+                self.assertEqual(
+                    MODULE.t3_thread_target({"session_id": "codex-session-1"}),
+                    ("environment-1", "t3-thread-1"),
+                )
+                self.assertEqual(
+                    MODULE.t3_thread_target({"t3_thread_id": "t3-thread-opencode"}),
+                    ("environment-1", "t3-thread-opencode"),
+                )
 
 
 class NotificationTextTests(unittest.TestCase):

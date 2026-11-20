@@ -62,11 +62,10 @@ Codex Alert ignores ephemeral `codex exec` helpers used by T3 Code to generate
 thread titles and other metadata. Completion IDs are claimed before either
 desktop or phone delivery starts, while both receivers retain their own
 idempotency checks as an additional safeguard against duplicate Stop hooks.
-Terminal task failures are detected from Codex's append-only rollout events,
-because Codex does not currently run Stop hooks for failed turns. The watcher
-alerts only on a turn-level `task_complete` error: failed commands that Codex
-can recover from, cancelled turns, subagents, and ephemeral metadata jobs do
-not trigger an alert. It follows new data through Linux inotify and keeps
+The watcher detects terminal Codex failures from failed `task_complete`
+events in the rollout log. Failed commands that Codex can recover from,
+cancelled turns, subagents, and ephemeral metadata jobs do not trigger an alert.
+The watcher follows new data through Linux inotify and keeps
 durable byte offsets, so it is immediate without repeatedly reading session
 history or replaying old failures after an install or restart.
 On every watcher start, existing files are baselined at their current end;
@@ -74,10 +73,15 @@ events from while the watcher was offline are intentionally skipped. Replaced
 or truncated logs are also baselined, and events older than two minutes are
 discarded to prevent stale notification bursts.
 
-Explicit Codex `request_user_input` and `request_user_input_async` tool calls
-send an “Input ℹ️” notification with the question text. Each request
-has its own notification ID, separate from the turn's completion or failure.
+Explicit Codex `request_user_input`, `request_user_input_async`, and
+`send_message_to_user_async` tool calls send an “Input ℹ️” notification with
+the question or message. Each request has its own notification ID.
 Ordinary questions written in assistant prose do not trigger this alert.
+
+With T3 Code integration enabled, the watcher also reads new events from the
+local T3 Code database. Pending questions and approvals send input alerts.
+Failed T3 Code runs, including runs from providers such as OpenCode, send
+failure alerts with the provider's error when available.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses
