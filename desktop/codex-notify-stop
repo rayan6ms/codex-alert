@@ -11,7 +11,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agents_alert_providers import (
+    ANTIGRAVITY,
+    CLAUDE,
+    PROVIDER_NAMES,
+    antigravity_event,
+    claude_event,
+    t3_handles_session,
+)
 from codex_alert_common import (
+    APP_NAME,
     T3_CURRENT_DB,
     T3_LEGACY_DB,
     T3_STATE_DIR,
@@ -122,7 +131,7 @@ def markdown_to_plain_text(value):
 def completion_id(payload, account):
     session_id = str(payload.get("session_id") or "").strip()
     turn_id = str(payload.get("turn_id") or "").strip()
-    if not session_id and not turn_id:
+    if (not session_id and not turn_id) or (payload.get("provider") and not turn_id):
         return None
     identity = f"{account}\0{session_id}\0{turn_id}".encode("utf-8")
     return "codex-" + hashlib.sha256(identity).hexdigest()[:32]
@@ -200,7 +209,7 @@ def t3_thread_target(payload):
 
     thread_id = str(payload.get("t3_thread_id") or "").strip()
     provider_thread_id = str(payload.get("session_id") or "").strip()
-    if not thread_id and provider_thread_id:
+    if not thread_id and provider_thread_id and not payload.get("provider"):
         match = t3_codex_session(provider_thread_id, T3_CURRENT_DB, T3_LEGACY_DB)
         if match:
             thread_id = str(match[0] or "").strip()
@@ -239,56 +248,28 @@ def launch(command):
         return False
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--account", default="codex")
-    parser.add_argument("--waiting-input", action="store_true")
-    parser.add_argument(
-        "--failure", action="store_true",
-        help="dispatch a terminal task failure observed in the rollout log",
-    )
-    args = parser.parse_args()
-
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        payload = {}
-
-    account = account_name(args.account)
-    if is_ephemeral_codex_exec():
-        log({
-            "event": "ephemeral-completion-ignored",
-            "account": account,
-            "model": compact(payload.get("model"), 100),
-            "session_id": payload.get("session_id"),
-            "turn_id": payload.get("turn_id"),
-        })
-        print("{}")
-        return 0
-
+def dispatch(payload, account, outcome):
     cwd = str(payload.get("cwd") or os.getcwd())
-    project = Path(cwd).name or cwd or "Codex"
+    project = Path(cwd).name or cwd or APP_NAME
     model = compact(payload.get("model"), 100)
-    if args.waiting_input:
-        outcome = "input"
-        message = compact(markdown_to_plain_text(payload.get("input_message") or "Codex needs your input."))
+    label = PROVIDER_NAMES.get(account, account)
+    if outcome == "input":
+        message = compact(markdown_to_plain_text(payload.get("input_message") or "The agent needs your input."))
         title = f"Input ℹ️ · {project}"
-    elif args.failure:
-        outcome = "failure"
+    elif outcome == "failure":
         message = compact(markdown_to_plain_text(
-            payload.get("error") or "The Codex task failed."
+            payload.get("error") or "The task failed."
         ))
         title = f"Failed ❌ · {project}"
     else:
-        outcome = "completion"
         message = compact(markdown_to_plain_text(
             payload.get("last_assistant_message") or "Task completed."
         ))
         title = f"Finished ✅ · {project}"
-    details = account + (f" · {model}" if model else "")
+    details = label + (f" · {model}" if model else "")
     body = details + (f"\n{message}" if message else "")
     event_id = completion_id(payload, account)
-    if args.waiting_input:
+    if outcome == "input":
         request_id = str(payload.get("request_id") or "").strip()
         if not request_id:
             return 1
@@ -302,7 +283,6 @@ def main():
             "turn_id": payload.get("turn_id"),
             "event_id": event_id,
         })
-        print("{}")
         return 0
     t3_target = t3_thread_target(payload)
 
@@ -330,8 +310,61 @@ def main():
         "phone_launched": phone_ok,
     })
 
-    print("{}")
     return 0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--account", default="codex")
+    parser.add_argument("--waiting-input", action="store_true")
+    parser.add_argument("--failure", action="store_true")
+    parser.add_argument("--provider", choices=PROVIDER_NAMES)
+    parser.add_argument("--hook-event", choices=("Stop", "PreToolUse"))
+    args = parser.parse_args()
+
+    try:
+        payload = json.load(sys.stdin)
+    except (UnicodeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if args.provider:
+        response = {}
+        if args.provider == ANTIGRAVITY:
+            response["decision"] = "allow" if args.hook_event == "PreToolUse" else "stop"
+        try:
+            payload = (
+                claude_event(payload) if args.provider == CLAUDE
+                else antigravity_event(payload, args.hook_event)
+            )
+            if payload and not t3_handles_session(args.provider, payload.get("session_id")):
+                payload["provider"] = args.provider
+                if "request_id" in payload:
+                    outcome = "input"
+                else:
+                    outcome = "failure" if "error" in payload else "completion"
+                dispatch(payload, args.provider, outcome)
+        except OSError as exc:
+            log({"event": "hook-dispatch-failed", "provider": args.provider, "error": repr(exc)})
+        print(json.dumps(response))
+        return 0
+
+    account = account_name(args.account)
+    if is_ephemeral_codex_exec():
+        log({
+            "event": "ephemeral-completion-ignored",
+            "account": account,
+            "model": compact(payload.get("model"), 100),
+            "session_id": payload.get("session_id"),
+            "turn_id": payload.get("turn_id"),
+        })
+        result = 0
+    else:
+        outcome = "input" if args.waiting_input else "failure" if args.failure else "completion"
+        result = dispatch(payload, account, outcome)
+    print("{}")
+    return result
 
 
 if __name__ == "__main__":

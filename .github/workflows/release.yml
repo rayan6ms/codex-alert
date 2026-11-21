@@ -39,7 +39,8 @@ jobs:
             desktop/codex-notify-stop \
             desktop/codex-notify-stop-desktop \
             desktop/codex-phone-deliver \
-            desktop/codex_alert_common.py
+            desktop/codex_alert_common.py \
+            desktop/agents_alert_providers.py
           bash -n install.sh install-latest.sh desktop/install.sh scripts/package-desktop.sh
           shellcheck install.sh install-latest.sh desktop/install.sh scripts/package-desktop.sh
 

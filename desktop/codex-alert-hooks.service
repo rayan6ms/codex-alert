@@ -1,9 +1,9 @@
 [Unit]
-Description=Synchronize Codex Alert across authenticated Codex accounts
+Description=Configure Agents Alert hooks for installed agents
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/codex-alert setup --quiet
+ExecStart=%h/.local/bin/agents-alert setup --quiet
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

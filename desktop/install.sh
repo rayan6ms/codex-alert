@@ -39,11 +39,13 @@ install -d -m 700 \
     "${icon_dir}" \
     "${applications_dir}"
 
+install -m 600 "${project_dir}/desktop/codex_alert_common.py" "${lib_dir}/codex_alert_common.py"
+install -m 600 "${project_dir}/desktop/agents_alert_providers.py" "${lib_dir}/agents_alert_providers.py"
 for program in codex-alert codex-alert-failure-watch codex-notify-stop codex-notify-stop-desktop codex-phone-deliver; do
     install -m 700 "${project_dir}/desktop/${program}" "${lib_dir}/${program}"
     ln -sfn "${lib_dir}/${program}" "${bin_dir}/${program}"
 done
-install -m 600 "${project_dir}/desktop/codex_alert_common.py" "${lib_dir}/codex_alert_common.py"
+ln -sfn "${lib_dir}/codex-alert" "${bin_dir}/agents-alert"
 install -m 644 "${project_dir}/desktop/dev.rayan.codexalert.svg" \
     "${icon_dir}/dev.rayan.codexalert.svg"
 install -m 644 "${project_dir}/desktop/dev.rayan.codexalert.desktop" \
@@ -68,7 +70,7 @@ if [[ "${systemd_user}" == true ]]; then
     account_detection="systemd user timer"
 else
     install -d -m 700 "${autostart_dir}"
-    escaped_bin="${bin_dir//\\/\\\\}/codex-alert"
+    escaped_bin="${bin_dir//\\/\\\\}/agents-alert"
     escaped_bin="${escaped_bin//\"/\\\"}"
     escaped_bin="${escaped_bin//&/\\&}"
     escaped_bin="${escaped_bin//|/\\|}"
@@ -80,9 +82,9 @@ else
     unlink "${generated_entry}"
     account_detection="cross-desktop XDG autostart"
 fi
-"${bin_dir}/codex-alert" setup
+"${bin_dir}/agents-alert" setup
 
-printf '\nCodex Alert desktop is installed.\n'
+printf '\nAgents Alert desktop is installed.\n'
 printf 'Account detection: %s.\n' "${account_detection}"
-printf 'Run codex-alert test to check the desktop notification.\n'
-printf 'For phone alerts, install the Android app and run codex-alert pair.\n'
+printf 'Run agents-alert test to check the desktop notification.\n'
+printf 'For phone alerts, install the Android app and run agents-alert pair.\n'

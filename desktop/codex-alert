@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-"""Set up, pair, test, and inspect Codex Alert."""
+"""Set up, pair, test, and inspect Agents Alert."""
 
 import argparse
 import fcntl
@@ -22,7 +22,9 @@ import tomllib
 import uuid
 from pathlib import Path
 
+from agents_alert_providers import PROVIDER_NAMES, add_provider_hooks, provider_config, provider_installed
 from codex_alert_common import (
+    APP_NAME,
     CERTIFICATE_FILE,
     CONFIG_DIR,
     PHONE_FILE,
@@ -113,7 +115,7 @@ def file_signature(path):
         return None
 
 
-def sync_hook_file(path):
+def sync_hook_configuration(path, update):
     target = hook_target(path)
     original_signature = file_signature(target)
     try:
@@ -124,12 +126,32 @@ def sync_hook_file(path):
     if not isinstance(value, dict):
         raise RuntimeError(f"cannot safely update non-object JSON in {path}")
 
+    original = json.dumps(value, indent=2)
+    update(value)
+    rendered = json.dumps(value, indent=2)
+    if rendered == original:
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(rendered + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        if file_signature(target) != original_signature:
+            raise RuntimeError(f"hooks changed while {APP_NAME} was updating {target}; retrying later")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+def add_codex_hook(value):
     hooks = value.setdefault("hooks", {})
     if not isinstance(hooks, dict):
-        raise RuntimeError(f"cannot safely update invalid hooks in {path}")
+        raise RuntimeError("cannot safely update invalid Codex hooks")
     stop = hooks.setdefault("Stop", [])
     if not isinstance(stop, list):
-        raise RuntimeError(f"cannot safely update invalid Stop hooks in {path}")
+        raise RuntimeError("cannot safely update invalid Codex Stop hooks")
 
     # Keep our hook in a dedicated, match-all group. This makes its behavior and
     # Codex trust identity deterministic while preserving every unrelated hook.
@@ -147,21 +169,9 @@ def sync_hook_file(path):
     cleaned_stop.append(hook_definition())
     hooks["Stop"] = cleaned_stop
 
-    rendered = json.dumps(value, indent=2) + "\n"
-    if source == rendered:
-        return False
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(rendered, encoding="utf-8")
-        temporary.chmod(0o600)
-        if file_signature(target) != original_signature:
-            raise RuntimeError(f"hooks changed while Codex Alert was updating {target}; retrying later")
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return True
+def sync_hook_file(path):
+    return sync_hook_configuration(path, add_codex_hook)
 
 
 def hook_file_configured(path):
@@ -203,7 +213,7 @@ class CodexAppServer:
                 {
                     "clientInfo": {
                         "name": "codex_alert",
-                        "title": "Codex Alert",
+                        "title": APP_NAME,
                         "version": "1",
                     },
                     "capabilities": {"experimentalApi": True},
@@ -318,7 +328,7 @@ def codex_alert_hook_metadata(client, home):
         and hook.get("sourcePath") == expected_source
     ]
     if len(matches) != 1:
-        raise RuntimeError(f"Codex did not discover exactly one Codex Alert hook for {home}")
+        raise RuntimeError(f"Codex did not discover exactly one {APP_NAME} hook for {home}")
     return matches[0]
 
 
@@ -350,9 +360,9 @@ def configured_hook_key(home):
             if is_codex_alert_hook(hook)
         ]
     except (AttributeError, OSError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"cannot determine Codex Alert hook key in {path}: {exc}") from exc
+        raise RuntimeError(f"cannot determine {APP_NAME} hook key in {path}: {exc}") from exc
     if len(matches) != 1:
-        raise RuntimeError(f"expected exactly one Codex Alert hook in {path}")
+        raise RuntimeError(f"expected exactly one {APP_NAME} hook in {path}")
     return matches[0]
 
 
@@ -442,7 +452,7 @@ def inspect_hook_trust(homes):
 
 
 def ensure_hook_trust(homes):
-    """Trust and enable only the exact completion hook installed by Codex Alert."""
+    """Trust and enable only the exact completion hook installed by Agents Alert."""
     trusted = 0
     failures = []
     cache_entries = []
@@ -527,6 +537,25 @@ def sync_hooks(quiet=False):
     return 1 if failures else 0
 
 
+def setup_providers(provider=None, quiet=False):
+    result = sync_hooks(quiet) if provider in (None, "codex") else 0
+    for candidate, name in PROVIDER_NAMES.items():
+        if candidate != provider and (provider is not None or not provider_installed(candidate)):
+            continue
+        path = provider_config(candidate)
+        try:
+            sync_hook_configuration(
+                path, lambda config: add_provider_hooks(config, candidate, HOOK_COMMAND)
+            )
+        except (OSError, RuntimeError) as exc:
+            print(f"Warning: {name} hooks in {path}: {exc}", file=sys.stderr)
+            result = 1
+        else:
+            if not quiet:
+                print(f"Configured {name} hooks in {path}.")
+    return result
+
+
 def watch_hooks():
     """Keep account discovery available on desktops without a systemd user manager."""
     WATCH_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -549,7 +578,7 @@ def watch_hooks():
                         env=os.environ.copy(),
                         close_fds=True,
                     )
-                sync_hooks(quiet=True)
+                setup_providers(quiet=True)
                 time.sleep(WATCH_INTERVAL_SECONDS)
         finally:
             if failure_watcher is not None and failure_watcher.poll() is None:
@@ -612,7 +641,7 @@ def choose_phone(explicit_host=None):
             choice = input("Choose a phone: ").strip()
             if choice.isdigit() and 1 <= int(choice) <= len(phones):
                 return phones[int(choice) - 1][1]
-    return input("Phone address shown in Codex Alert: ").strip()
+    return input(f"Phone address shown in {APP_NAME}: ").strip()
 
 
 def pair_request(host, code, confirm_certificate):
@@ -772,7 +801,7 @@ def pair(args):
     host = choose_phone(args.host)
     if not host:
         raise RuntimeError("a phone address is required")
-    code = args.code or input("8-digit code shown in Codex Alert: ").strip().replace(" ", "")
+    code = args.code or input(f"8-digit code shown in {APP_NAME}: ").strip().replace(" ", "")
     if not PAIR_CODE.fullmatch(code):
         raise RuntimeError("the pairing code must contain exactly 8 digits")
     def confirm_certificate(certificate):
@@ -802,10 +831,10 @@ def test_phone():
     result = run(
         [
             str(PHONE_DELIVER),
-            "--title", "Codex Alert is ready",
-            "--body", "Pairing succeeded. Future Codex completions will appear here.",
+            "--title", f"{APP_NAME} is ready",
+            "--body", "Pairing succeeded. Future agent alerts will appear here.",
             "--account", "setup",
-            "--project", "Codex Alert",
+            "--project", APP_NAME,
             "--event-id", event_id,
         ],
         10,
@@ -822,10 +851,10 @@ def test_all():
     desktop = run(
         [
             str(DESKTOP_NOTIFY),
-            "--title", "Codex Alert is ready",
-            "--body", "Desktop completion notifications are working.",
+            "--title", f"{APP_NAME} is ready",
+            "--body", "Desktop notifications are working.",
             "--account", "setup",
-            "--project", "Codex Alert",
+            "--project", APP_NAME,
             "--event-id", event_id,
         ],
         10,
@@ -842,7 +871,7 @@ def status():
     homes = codex_homes()
     configured = sum(hook_file_configured(home / "hooks.json") for home in homes)
     trusted, total, issues = inspect_hook_trust(homes) if homes else (0, 0, [])
-    print(f"Desktop hooks: {trusted}/{total} active ({configured}/{len(homes)} configured)")
+    print(f"Codex hooks: {trusted}/{total} active ({configured}/{len(homes)} configured)")
     for issue in issues:
         print(f"  Warning: {issue}")
     print(
@@ -859,7 +888,7 @@ def status():
             os.kill(failure_pid, 0)
         except OSError:
             failure_running = False
-    print(f"Failure alerts: {'active' if failure_running else 'inactive'}")
+    print(f"Codex and T3 event watcher: {'active' if failure_running else 'inactive'}")
     if PHONE_DELIVER.exists() and phone_configured():
         result = run([str(PHONE_DELIVER), "status"], 10)
         if result.stdout:
@@ -870,8 +899,9 @@ def status():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    setup_parser = subparsers.add_parser("setup", help="configure every local Codex profile")
+    setup_parser = subparsers.add_parser("setup", help="configure hooks for installed agents")
     setup_parser.add_argument("--quiet", action="store_true")
+    setup_parser.add_argument("--provider", choices=("codex", *PROVIDER_NAMES))
     pair_parser = subparsers.add_parser("pair", help="pair an Android phone")
     pair_parser.add_argument("--host", help="phone IP or .local name")
     pair_parser.add_argument("--code", help="8-digit code shown by the Android app")
@@ -884,7 +914,7 @@ def main():
 
     try:
         if args.command == "setup":
-            return sync_hooks(args.quiet)
+            return setup_providers(args.provider, args.quiet)
         if args.command == "pair":
             return pair(args)
         if args.command == "status":

@@ -1,6 +1,6 @@
 # Security
 
-Codex Alert has no cloud relay. The Android receiver accepts only local/private
+Agents Alert delivers notifications directly. The Android receiver accepts only local/private
 LAN and Tailscale sources, uses a device-generated Android Keystore TLS key, and
 requires a random bearer token after pairing. Pair only on a trusted network and
 confirm that the four-part security code is identical on the phone and desktop.

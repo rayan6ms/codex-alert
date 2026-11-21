@@ -5,7 +5,7 @@ repository="${CODEX_ALERT_REPOSITORY:-rayan6ms/codex-alert}"
 release_base="https://github.com/${repository}/releases/latest/download"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    printf 'Codex Alert desktop currently supports Linux and its standard notification service.\n' >&2
+    printf 'Agents Alert desktop currently supports Linux and its standard notification service.\n' >&2
     exit 1
 fi
 

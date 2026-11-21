@@ -1,5 +1,5 @@
 [Unit]
-Description=Watch Codex turns for terminal failure alerts
+Description=Watch Codex and T3 Code events for Agents Alert
 After=default.target
 
 [Service]

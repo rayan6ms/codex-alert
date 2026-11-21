@@ -579,7 +579,7 @@ public final class AlertServerService extends Service {
             return;
         }
         NsdServiceInfo serviceInfo = new NsdServiceInfo();
-        serviceInfo.setServiceName("Codex Alert · " + DeviceIdentity.deviceName());
+        serviceInfo.setServiceName(getString(R.string.app_name) + " · " + DeviceIdentity.deviceName());
         serviceInfo.setServiceType("_codexalert._tcp.");
         serviceInfo.setPort(PORT);
         serviceInfo.setAttribute("paired", DeviceIdentity.isPaired(this) ? "1" : "0");

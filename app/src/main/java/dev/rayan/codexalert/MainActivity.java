@@ -206,7 +206,7 @@ public final class MainActivity extends Activity {
         mark.setGravity(Gravity.CENTER);
         mark.setBackground(rounded(TEAL, 12));
         brand.addView(mark, new LinearLayout.LayoutParams(dp(36), dp(36)));
-        TextView name = text("Codex Alert", 17, INK);
+        TextView name = text(getString(R.string.app_name), 17, INK);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         LinearLayout.LayoutParams params = wrap();
         params.setMargins(dp(11), 0, 0, 0);
@@ -250,7 +250,7 @@ public final class MainActivity extends Activity {
 
     private void buildNotificationStep(LinearLayout content) {
         addPageHeading(content, "Let alerts reach you",
-                "Allow completion notifications so you know immediately when Codex has finished.");
+                "Allow notifications for finished tasks, failures, and requests for input.");
         LinearLayout card = card(SURFACE);
         card.addView(iconCircle("1", TEAL_PALE, TEAL));
         TextView title = text("Notifications", 18, INK);
@@ -258,13 +258,13 @@ public final class MainActivity extends Activity {
         addTop(card, title, 16);
         boolean allowed = notificationsAllowed();
         card.addView(text(allowed
-                ? "Allowed. Codex Alert can show completion alerts."
+                ? "Allowed. Agents Alert can show notifications."
                 : "Android is currently blocking completion alerts.", 15, allowed ? GREEN : MUTED));
         addTop(card, primaryButton(allowed ? "Notification settings" : "Allow notifications",
                 view -> requestNotificationPermission()), 20);
         addTop(content, card, 26);
         addTop(content, text(
-                "Only the alert title and task summary appear. Codex Alert has no cloud relay.",
+                "Alert titles and summaries travel directly from your computer to this phone.",
                 13, MUTED), 18);
     }
 
@@ -285,7 +285,7 @@ public final class MainActivity extends Activity {
         TextView commandLabel = text("ON YOUR COMPUTER", 11, MUTED);
         commandLabel.setTypeface(Typeface.DEFAULT_BOLD);
         command.addView(commandLabel);
-        TextView commandText = text("codex-alert pair", 17, INK);
+        TextView commandText = text("agents-alert pair", 17, INK);
         commandText.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         addTop(command, commandText, 8);
         command.addView(text(
@@ -295,7 +295,7 @@ public final class MainActivity extends Activity {
 
     private void buildFinishStep(LinearLayout content) {
         addPageHeading(content, "You’re ready",
-                "This phone is securely paired and listening for Codex completions.");
+                "This phone is securely paired and listening for agent alerts.");
         LinearLayout success = card(GREEN_PALE);
         success.addView(iconCircle("✓", Color.WHITE, GREEN));
         TextView title = text("Everything is working", 21, GREEN);
@@ -667,8 +667,8 @@ public final class MainActivity extends Activity {
                 heroPill.setContentDescription("Status: checking");
             } else if (ready) {
                 stylePill(heroPill, "●  READY", GREEN_PALE, GREEN);
-                heroTitle.setText("Codex Alert is working");
-                heroDetail.setText("Your phone is connected and ready for completion alerts.");
+                heroTitle.setText("Agents Alert is working");
+                heroDetail.setText("Your phone is connected and ready for alerts.");
                 heroPill.setContentDescription("Status: ready");
             } else if (!paired) {
                 stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);
@@ -678,7 +678,7 @@ public final class MainActivity extends Activity {
             } else if (!notifications) {
                 stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);
                 heroTitle.setText("Notifications are blocked");
-                heroDetail.setText("Allow notifications to receive Codex completions on this phone.");
+                heroDetail.setText("Allow notifications to receive agent alerts on this phone.");
                 heroPill.setContentDescription("Status: offline");
             } else {
                 stylePill(heroPill, "●  OFFLINE", RED_PALE, RED);

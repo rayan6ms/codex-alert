@@ -30,6 +30,7 @@ for source in \
     codex-phone-clear-on-input.service \
     codex-phone-delivery.service \
     codex_alert_common.py \
+    agents_alert_providers.py \
     dev.rayan.codexalert.svg \
     dev.rayan.codexalert.desktop \
     dev.rayan.codexalert-watch.desktop \

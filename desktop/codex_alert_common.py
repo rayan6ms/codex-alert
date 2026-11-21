@@ -1,4 +1,4 @@
-"""Shared configuration helpers for the Codex Alert desktop companion."""
+"""Shared configuration helpers for the Agents Alert desktop companion."""
 
 import json
 import os
@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 
+APP_NAME = "Agents Alert"
 HOME = Path.home()
 CONFIG_DIR = HOME / ".config/codex-alert"
 PHONE_FILE = CONFIG_DIR / "phone.json"
@@ -37,6 +38,17 @@ def atomic_json(path, value):
     )
     temporary.chmod(0o600)
     temporary.replace(path)
+
+
+def questions_text(questions):
+    if not isinstance(questions, list):
+        return ""
+    return "\n".join(
+        question.get("question") or question.get("title") or ""
+        for question in questions
+        if isinstance(question, dict)
+        and isinstance(question.get("question") or question.get("title") or "", str)
+    ).strip()
 
 
 def settings():

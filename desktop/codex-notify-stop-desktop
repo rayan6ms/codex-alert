@@ -10,6 +10,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from codex_alert_common import APP_NAME
+
 
 HOME = Path.home()
 STATE_DIR = HOME / ".local/state/codex-notify"
@@ -71,7 +73,7 @@ def notify(title, body):
             notify_send,
             "--print-id",
             f"--replace-id={replace_id}",
-            "--app-name=Codex Alert",
+            f"--app-name={APP_NAME}",
             f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
             # Keep the current completion in the message tray. Critical
@@ -101,7 +103,7 @@ def notify(title, body):
                 [
                     notify_send,
                     f"--replace-id={replace_id}",
-                    "--app-name=Codex Alert",
+                    f"--app-name={APP_NAME}",
                     f"--app-icon={APP_ICON}",
                     f"--icon={APP_ICON}",
                     "--hint=boolean:transient:false",
@@ -119,7 +121,7 @@ def notify(title, body):
             result = subprocess.run(
                 [
                     notify_send,
-                    "--app-name=Codex Alert",
+                    f"--app-name={APP_NAME}",
                     f"--app-icon={APP_ICON}",
                     f"--icon={APP_ICON}",
                     "--hint=boolean:transient:false",

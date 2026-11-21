@@ -23,10 +23,10 @@ final class AlertNotifier {
 
         NotificationChannel completion = new NotificationChannel(
                 COMPLETION_CHANNEL_ID,
-                "Codex completions",
+                "Agent alerts",
                 NotificationManager.IMPORTANCE_HIGH
         );
-        completion.setDescription("Alerts when a Codex job finishes");
+        completion.setDescription("Finished tasks, failures, and requests for input");
         completion.enableVibration(true);
         completion.enableLights(true);
         completion.setLightColor(Color.rgb(13, 148, 136));
@@ -38,7 +38,7 @@ final class AlertNotifier {
 
         NotificationChannel receiver = new NotificationChannel(
                 RECEIVER_CHANNEL_ID,
-                "Codex receiver",
+                "Alert receiver",
                 NotificationManager.IMPORTANCE_MIN
         );
         receiver.setDescription("Keeps the private LAN and Tailscale receiver available");
@@ -61,7 +61,7 @@ final class AlertNotifier {
     static Notification ready(Context context, String detail) {
         return new Notification.Builder(context, RECEIVER_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_codex_alert)
-                .setContentTitle("Codex receiver active")
+                .setContentTitle("Agents Alert receiver active")
                 .setContentText(detail)
                 .setStyle(new Notification.BigTextStyle().bigText(detail))
                 .setContentIntent(openApp(context))

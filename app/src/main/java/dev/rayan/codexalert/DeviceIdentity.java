@@ -52,7 +52,7 @@ final class DeviceIdentity {
                                     KeyProperties.DIGEST_SHA384,
                                     KeyProperties.DIGEST_SHA512
                             )
-                            .setCertificateSubject(new X500Principal("CN=Codex Alert receiver"))
+                            .setCertificateSubject(new X500Principal("CN=Agents Alert receiver"))
                             .setCertificateSerialNumber(new BigInteger(1, serial))
                             .setCertificateNotBefore(new Date(now - 24L * 60 * 60 * 1000))
                             .setCertificateNotAfter(new Date(now + 20L * 365 * 24 * 60 * 60 * 1000))

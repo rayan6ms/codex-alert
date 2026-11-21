@@ -334,7 +334,8 @@ class T3EventTests(unittest.TestCase):
             );
             CREATE TABLE orchestration_v2_projection_turn_items (
                 turn_item_id TEXT, thread_id TEXT, run_id TEXT, node_id TEXT, type TEXT,
-                status TEXT, updated_at TEXT, ordinal INTEGER, provider_turn_id TEXT, payload_json TEXT
+                status TEXT, updated_at TEXT, ordinal INTEGER, provider_turn_id TEXT,
+                payload_json TEXT, provider_thread_id TEXT
             );
             INSERT INTO projection_projects VALUES ('project', '/tmp/project');
             INSERT INTO orchestration_v2_projection_threads VALUES
@@ -389,7 +390,7 @@ class T3EventTests(unittest.TestCase):
         self.connection.execute(
             "INSERT INTO orchestration_v2_projection_turn_items VALUES "
             "('error-1', 't3-thread', 'run-1', 'root-node', 'error', 'failed', '', 1, "
-            " 'provider-turn', ?)",
+            " 'provider-turn', ?, 'provider-thread')",
             ('{"failure":{"message":"Provider unavailable"}}',),
         )
         self.publish("run.updated", {
@@ -419,6 +420,29 @@ class T3EventTests(unittest.TestCase):
         self.poll()
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0]["input_message"], "Allow?")
+
+    def test_t3_sends_completions_for_claude_and_antigravity(self):
+        self.poll()
+        self.connection.execute(
+            "INSERT INTO orchestration_v2_projection_turn_items VALUES "
+            "('assistant-1', 't3-thread', 'run-1', 'root-node', 'assistant_message', "
+            "'completed', '', 1, 'provider-turn', ?, 'provider-thread')",
+            ('{"text":"Implemented the fix."}',),
+        )
+        for driver in ("opencode", "codex", "antigravity", "claudeAgent"):
+            self.connection.execute(
+                "UPDATE orchestration_v2_projection_provider_threads SET driver = ?", (driver,),
+            )
+            self.publish("run.updated", {
+                "id": "run-1", "status": "completed", "providerThreadId": "provider-thread",
+            })
+            self.poll()
+
+        self.assertEqual([account for _, account in self.calls], ["antigravity", "claude-code"])
+        for payload, _ in self.calls:
+            self.assertEqual(payload["last_assistant_message"], "Implemented the fix.")
+            self.assertEqual(payload["t3_thread_id"], "t3-thread")
+            self.assertEqual(payload["turn_id"], "run-1")
 
 
 if __name__ == "__main__":

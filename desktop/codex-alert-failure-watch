@@ -19,6 +19,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from agents_alert_providers import T3_PROVIDERS
 from codex_alert_common import (
     STATE_DIR,
     T3_CURRENT_DB,
@@ -27,6 +28,7 @@ from codex_alert_common import (
     atomic_json,
     codex_homes,
     open_t3_db,
+    questions_text,
     t3_account,
     t3_codex_session,
     t3_enabled,
@@ -296,15 +298,6 @@ def error_message(error):
     return compact(error)
 
 
-def question_message(questions):
-    if not isinstance(questions, list):
-        return ""
-    return compact("\n".join(
-        str(question.get("question") or question.get("title") or "")
-        for question in questions if isinstance(question, dict)
-    ))
-
-
 def handle_record(context, row, dispatch):
     """Update rollout context and forward input requests or terminal failures."""
     if not isinstance(row, dict):
@@ -354,7 +347,7 @@ def handle_record(context, row, dispatch):
             questions = arguments.get("questions")
             if not isinstance(questions, list) or not questions:
                 return True
-            message = question_message(questions)
+            message = compact(questions_text(questions))
         turn_id = context.get("model_turn_id", "")
         alert = {
             "request_id": payload["call_id"],
@@ -390,15 +383,18 @@ def handle_record(context, row, dispatch):
     return bool(dispatch(alert, account))
 
 
-def dispatch_failure(payload, account):
-    waiting_input = bool(payload.get("request_id"))
-    outcome = "input" if waiting_input else "failure"
-    option = "--waiting-input" if waiting_input else "--failure"
+def dispatch_alert(payload, account):
+    if payload.get("request_id"):
+        outcome, options = "input", ["--waiting-input"]
+    elif "error" in payload:
+        outcome, options = "failure", ["--failure"]
+    else:
+        outcome, options = "completion", []
     environment = clean_environment()
     environment.pop("CODEX_HOME", None)
     try:
         result = subprocess.run(
-            [str(NOTIFIER), option, "--account", account],
+            [str(NOTIFIER), *options, "--account", account],
             input=json.dumps(payload, ensure_ascii=False),
             text=True,
             stdout=subprocess.DEVNULL,
@@ -458,7 +454,7 @@ def baseline_file(connection, path, account):
     return True
 
 
-def process_file(connection, path, account, dispatch=dispatch_failure):
+def process_file(connection, path, account, dispatch=dispatch_alert):
     """Consume complete records appended after the durable file offset."""
     path = Path(path).resolve(strict=False)
     try:
@@ -564,7 +560,7 @@ def initialize(connection, roots, force=False):
     return True
 
 
-def reconcile(connection, roots, dispatch=dispatch_failure):
+def reconcile(connection, roots, dispatch=dispatch_alert):
     active = set()
     for path, account in rollout_files(roots):
         resolved = path.resolve(strict=False)
@@ -585,21 +581,24 @@ def reconcile(connection, roots, dispatch=dispatch_failure):
 
 
 def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
+    completed = event_type == "run.updated" and event.get("status") == "completed"
     if event_type == "run.updated":
         if event.get("delegatedTaskId") or not live_timestamp(event.get("completedAt") or occurred_at):
             return None
-        failure = connection.execute(
-            """
-            SELECT provider_turn_id, json_extract(payload_json, '$.failure.message')
-            FROM orchestration_v2_projection_turn_items
-            WHERE thread_id = ? AND run_id = ? AND node_id = ?
-              AND type = 'error' AND status = 'failed'
-            ORDER BY updated_at DESC, ordinal DESC, turn_item_id DESC LIMIT 1
-            """,
-            (thread_id, event["id"], event.get("rootNodeId")),
-        ).fetchone()
-        turn_id, message = failure or (None, None)
-        alert = {"error": compact(message) or "The T3 Code run failed."}
+        turn_id, alert = None, {}
+        if not completed:
+            failure = connection.execute(
+                """
+                SELECT provider_turn_id, json_extract(payload_json, '$.failure.message')
+                FROM orchestration_v2_projection_turn_items
+                WHERE thread_id = ? AND run_id = ? AND node_id = ?
+                  AND type = 'error' AND status = 'failed'
+                ORDER BY updated_at DESC, ordinal DESC, turn_item_id DESC LIMIT 1
+                """,
+                (thread_id, event["id"], event.get("rootNodeId")),
+            ).fetchone()
+            turn_id, message = failure or (None, None)
+            alert["error"] = compact(message) or "The T3 Code run failed."
         fallback_turn_id = event["id"]
     else:
         if not live_timestamp(event.get("startedAt") or occurred_at):
@@ -617,7 +616,7 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         native_item = event.get("nativeItemRef") or {}
         native_request_id = None if is_approval else native_item.get("nativeId")
         request_id = native_request_id or event.get("requestId") or event["id"]
-        message = question_message(event.get("questions")) or compact(event.get("prompt"))
+        message = compact(questions_text(event.get("questions")) or event.get("prompt"))
         fallback_message = (
             "T3 Code needs your approval." if is_approval else "T3 Code needs your input."
         )
@@ -655,6 +654,20 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         return None
 
     session_id, native_turn_id, cwd, model, instance_id, driver = context
+    if completed:
+        if driver not in T3_PROVIDERS:
+            return None
+        summary = connection.execute(
+            """
+            SELECT substr(json_extract(payload_json, '$.text'), 1, 1201)
+            FROM orchestration_v2_projection_turn_items
+            WHERE thread_id = ? AND run_id = ? AND type = 'assistant_message'
+              AND provider_thread_id = ? AND status = 'completed'
+            ORDER BY ordinal DESC LIMIT 1
+            """,
+            (thread_id, event["id"], event.get("providerThreadId")),
+        ).fetchone()
+        alert["last_assistant_message"] = compact(summary[0]) if summary else ""
     alert.update(
         session_id=session_id or thread_id,
         turn_id=native_turn_id or fallback_turn_id,
@@ -662,7 +675,7 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         cwd=cwd or "",
         model=model or "",
     )
-    account = t3_account(instance_id, driver or "codex", T3_SETTINGS_FILE)
+    account = T3_PROVIDERS.get(driver) or t3_account(instance_id, driver or "codex", T3_SETTINGS_FILE)
     return alert, account
 
 
@@ -673,7 +686,7 @@ class T3Events:
         self.identity = None
         self.sequence = 0
 
-    def poll(self, path, dispatch=dispatch_failure):
+    def poll(self, path, dispatch=dispatch_alert):
         try:
             status = path.stat()
             identity = (status.st_dev, status.st_ino)
@@ -703,7 +716,7 @@ class T3Events:
                     FROM orchestration_events
                     WHERE sequence > ? AND sequence <= ? AND aggregate_kind = 'thread'
                       AND CASE event_type
-                          WHEN 'run.updated' THEN json_extract(payload_json, '$.status') = 'failed'
+                          WHEN 'run.updated' THEN json_extract(payload_json, '$.status') IN ('completed', 'failed')
                           WHEN 'turn-item.updated' THEN
                             json_extract(payload_json, '$.type') IN ('user_input_request', 'approval_request')
                             AND json_extract(payload_json, '$.status') IN ('pending', 'waiting')

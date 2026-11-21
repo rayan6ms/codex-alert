@@ -1,6 +1,7 @@
 import importlib.machinery
 import http.client
 import json
+import shlex
 import sys
 import tempfile
 import unittest
@@ -354,13 +355,58 @@ class HookSetupTests(unittest.TestCase):
             with (
                 patch.object(MODULE, "WATCH_LOCK", lock),
                 patch.object(MODULE, "FAILURE_WATCH", Path(temporary) / "missing-failure-watch"),
-                patch.object(MODULE, "sync_hooks", return_value=0) as sync,
+                patch.object(MODULE, "setup_providers", return_value=0) as sync,
                 patch.object(MODULE.time, "sleep", side_effect=KeyboardInterrupt),
                 self.assertRaises(KeyboardInterrupt),
             ):
                 MODULE.watch_hooks()
 
             sync.assert_called_once_with(quiet=True)
+
+    def test_setup_installs_claude_hooks_and_preserves_settings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.json"
+            notifier = "/opt/Agents Alert/codex-notify-stop"
+            other = {"hooks": [{"type": "command", "command": "custom-stop"}]}
+            path.write_text(json.dumps({
+                "permissions": {"deny": ["Bash"]}, "hooks": {"Stop": [other]},
+            }), encoding="utf-8")
+            with (
+                patch.object(MODULE, "provider_config", return_value=path),
+                patch.object(MODULE, "HOOK_COMMAND", notifier),
+                patch.object(MODULE, "sync_hooks") as codex_setup,
+            ):
+                self.assertEqual(MODULE.setup_providers("claude-code", quiet=True), 0)
+                configured = path.read_text(encoding="utf-8")
+                self.assertEqual(MODULE.setup_providers("claude-code", quiet=True), 0)
+                codex_setup.assert_not_called()
+            self.assertEqual(path.read_text(encoding="utf-8"), configured)
+            value = json.loads(configured)
+            self.assertEqual(value["permissions"], {"deny": ["Bash"]})
+            self.assertEqual(value["hooks"]["Stop"][0], other)
+            for event in ("Stop", "StopFailure", "PreToolUse", "PermissionRequest"):
+                command = value["hooks"][event][-1]["hooks"][0]["command"]
+                self.assertEqual(shlex.split(command), [notifier, "--provider", "claude-code"])
+            self.assertEqual(value["hooks"]["PreToolUse"][0]["matcher"], "^AskUserQuestion$")
+
+    def test_setup_preserves_antigravity_hook_groups_and_disabled_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "hooks.json"
+            other = {"Stop": [{"hooks": [{"command": "./custom-stop.sh"}]}]}
+            path.write_text(json.dumps({
+                "my-hook": other, "agents-alert": {"enabled": False},
+            }), encoding="utf-8")
+            with patch.object(MODULE, "provider_config", return_value=path):
+                self.assertEqual(MODULE.setup_providers("antigravity", quiet=True), 0)
+                self.assertEqual(MODULE.setup_providers("antigravity", quiet=True), 0)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(value["my-hook"], other)
+            self.assertFalse(value["agents-alert"]["enabled"])
+            for event in ("Stop", "PreToolUse"):
+                groups = value["agents-alert"][event]
+                self.assertEqual(len(groups), 1)
+                self.assertEqual(shlex.split(groups[0]["hooks"][0]["command"])[1:],
+                                 ["--provider", "antigravity", "--hook-event", event])
 
     def test_quiet_timer_uses_valid_trust_cache_without_starting_codex(self):
         with tempfile.TemporaryDirectory() as temporary:

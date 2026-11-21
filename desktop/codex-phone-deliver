@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-"""Durable, event-driven delivery of Codex completion alerts to Android."""
+"""Durable, event-driven delivery of agent alerts to Android."""
 
 import argparse
 import fcntl
@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from codex_alert_common import (
+    APP_NAME,
     CERTIFICATE_FILE,
     PHONE_FILE,
     STATE_DIR,
@@ -553,21 +554,21 @@ def notify_delivery_problem(depth, error):
     result = subprocess.run(
         [
             NOTIFY_SEND, "--print-id", f"--replace-id={previous}",
-            "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
+            f"--app-name={APP_NAME}", f"--app-icon={APP_ICON}",
             f"--icon={APP_ICON}",
             "--urgency=low",
             "Phone alerts are waiting",
-            f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
+            f"{depth} alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
         ],
         env=clean_environment(), check=False, timeout=3, capture_output=True, text=True,
     )
     if result.returncode != 0:
         result = subprocess.run(
             [
-                NOTIFY_SEND, "--app-name=Codex Alert", f"--app-icon={APP_ICON}",
+                NOTIFY_SEND, f"--app-name={APP_NAME}", f"--app-icon={APP_ICON}",
                 f"--icon={APP_ICON}", "--urgency=low",
                 "Phone alerts are waiting",
-                f"{depth} Codex alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
+                f"{depth} alert{'s' if depth != 1 else ''} queued. Retrying automatically.\n{compact(error, 180)}",
             ],
             env=clean_environment(), check=False, timeout=3,
             capture_output=True, text=True,

@@ -1,5 +1,5 @@
 [Unit]
-Description=Detect authenticated Codex accounts for Codex Alert
+Description=Detect agent installations for Agents Alert
 
 [Timer]
 OnBootSec=1min

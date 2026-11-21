@@ -1,5 +1,5 @@
 [Unit]
-Description=Deliver queued Codex Alert notifications to Android
+Description=Deliver queued Agents Alert notifications to Android
 After=default.target
 
 [Service]
