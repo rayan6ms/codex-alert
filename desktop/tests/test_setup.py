@@ -1,4 +1,5 @@
 import importlib.machinery
+import importlib.util
 import http.client
 import json
 import shlex
@@ -14,7 +15,10 @@ sys.path.insert(0, str(SCRIPT.parent))
 import codex_alert_common as common
 
 
-MODULE = importlib.machinery.SourceFileLoader("codex_alert_cli", str(SCRIPT)).load_module()
+_LOADER = importlib.machinery.SourceFileLoader("codex_alert_cli", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_alert_cli", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 class FakePairingResponse:

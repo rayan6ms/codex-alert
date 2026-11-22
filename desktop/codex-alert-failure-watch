@@ -26,7 +26,9 @@ from codex_alert_common import (
     T3_LEGACY_DB,
     T3_SETTINGS_FILE,
     atomic_json,
+    clean_title,
     codex_homes,
+    is_t3_scratch_path,
     open_t3_db,
     questions_text,
     t3_account,
@@ -633,7 +635,9 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
                         json_extract(run.payload_json, '$.modelSelection.model')),
                COALESCE(run.provider_instance_id, provider_thread.provider_instance_id,
                         thread.provider_instance_id),
-               COALESCE(provider_thread.driver, thread.default_provider)
+               COALESCE(provider_thread.driver, thread.default_provider),
+               json_extract(thread.payload_json, '$.title'),
+               project.workspace_root
         FROM orchestration_v2_projection_threads AS thread
         LEFT JOIN projection_projects AS project ON project.project_id = thread.project_id
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = ?
@@ -653,7 +657,7 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
     if not context:
         return None
 
-    session_id, native_turn_id, cwd, model, instance_id, driver = context
+    session_id, native_turn_id, cwd, model, instance_id, driver, raw_title, workspace_root = context
     if completed:
         if driver not in T3_PROVIDERS:
             return None
@@ -675,6 +679,11 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         cwd=cwd or "",
         model=model or "",
     )
+    thread_title = clean_title(raw_title)
+    if thread_title:
+        alert["thread_title"] = thread_title
+    if is_t3_scratch_path(workspace_root) or is_t3_scratch_path(cwd):
+        alert["is_scratch"] = True
     account = T3_PROVIDERS.get(driver) or t3_account(instance_id, driver or "codex", T3_SETTINGS_FILE)
     return alert, account
 

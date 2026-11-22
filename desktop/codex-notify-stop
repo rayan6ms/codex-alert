@@ -15,6 +15,7 @@ from agents_alert_providers import (
     ANTIGRAVITY,
     CLAUDE,
     PROVIDER_NAMES,
+    T3_PROVIDERS,
     antigravity_event,
     claude_event,
     t3_handles_session,
@@ -24,9 +25,14 @@ from codex_alert_common import (
     T3_CURRENT_DB,
     T3_LEGACY_DB,
     T3_STATE_DIR,
+    clean_title,
+    codex_session_title,
+    is_t3_scratch_path,
     phone_configured,
     t3_codex_session,
     t3_enabled,
+    t3_session,
+    t3_thread_metadata,
 )
 
 
@@ -196,8 +202,29 @@ def remember_dispatch(event_id):
         return True
 
 
+def provider_driver(provider):
+    if not provider:
+        return "codex"
+    return next((driver for driver, name in T3_PROVIDERS.items() if name == provider), None)
+
+
+def t3_thread_id_for(payload):
+    thread_id = str(payload.get("t3_thread_id") or "").strip()
+    if thread_id:
+        return thread_id
+    provider_thread_id = str(payload.get("session_id") or "").strip()
+    driver = provider_driver(payload.get("provider"))
+    if not provider_thread_id or not driver:
+        return ""
+    if driver == "codex":
+        match = t3_codex_session(provider_thread_id, T3_CURRENT_DB, T3_LEGACY_DB)
+    else:
+        match = t3_session(provider_thread_id, driver=driver, current_db=T3_CURRENT_DB, legacy_db=None)
+    return str(match[0] or "").strip() if match else ""
+
+
 def t3_thread_target(payload):
-    """Map Codex's provider thread id to T3's environment-scoped thread id."""
+    """Map a provider session to T3's environment-scoped thread id."""
     if not t3_enabled():
         return None
     try:
@@ -207,13 +234,47 @@ def t3_thread_target(payload):
     if not environment_id or len(environment_id) > 128:
         return None
 
-    thread_id = str(payload.get("t3_thread_id") or "").strip()
-    provider_thread_id = str(payload.get("session_id") or "").strip()
-    if not thread_id and provider_thread_id and not payload.get("provider"):
-        match = t3_codex_session(provider_thread_id, T3_CURRENT_DB, T3_LEGACY_DB)
-        if match:
-            thread_id = str(match[0] or "").strip()
+    thread_id = t3_thread_id_for(payload)
     return (environment_id, thread_id) if thread_id and len(thread_id) <= 128 else None
+
+
+def resolve_notification_context(payload, t3_target):
+    """Resolve the display heading, project detail, and thread title for an alert."""
+    cwd = str(payload.get("cwd") or os.getcwd())
+    thread_title = clean_title(payload.get("thread_title"))
+    project_name = clean_title(payload.get("project_name"))
+    is_scratch = bool(payload.get("is_scratch")) or is_t3_scratch_path(cwd)
+
+    thread_id = t3_target[1] if t3_target else t3_thread_id_for(payload)
+    if thread_id and (not thread_title or (not project_name and not is_scratch)):
+        metadata = t3_thread_metadata(thread_id, T3_CURRENT_DB, T3_LEGACY_DB)
+        if metadata:
+            if not thread_title:
+                thread_title = metadata["title"]
+            if metadata["is_scratch"]:
+                is_scratch = True
+                project_name = ""
+            elif not project_name:
+                project_name = metadata["project"]
+
+    if not thread_title and not payload.get("provider"):
+        thread_title = codex_session_title(str(payload.get("session_id") or "").strip())
+
+    cwd_name = Path(cwd).name or cwd
+    fallback_project = "" if is_scratch else (project_name or cwd_name)
+    if thread_title:
+        heading = thread_title
+        detail_project = (
+            fallback_project
+            if fallback_project and fallback_project.lower() != thread_title.lower()
+            else ""
+        )
+        log_project = fallback_project or thread_title
+    else:
+        heading = fallback_project or APP_NAME
+        detail_project = ""
+        log_project = heading
+    return heading, detail_project, log_project, thread_title
 
 
 def log(record):
@@ -249,25 +310,8 @@ def launch(command):
 
 
 def dispatch(payload, account, outcome):
-    cwd = str(payload.get("cwd") or os.getcwd())
-    project = Path(cwd).name or cwd or APP_NAME
     model = compact(payload.get("model"), 100)
     label = PROVIDER_NAMES.get(account, account)
-    if outcome == "input":
-        message = compact(markdown_to_plain_text(payload.get("input_message") or "The agent needs your input."))
-        title = f"Input ℹ️ · {project}"
-    elif outcome == "failure":
-        message = compact(markdown_to_plain_text(
-            payload.get("error") or "The task failed."
-        ))
-        title = f"Failed ❌ · {project}"
-    else:
-        message = compact(markdown_to_plain_text(
-            payload.get("last_assistant_message") or "Task completed."
-        ))
-        title = f"Finished ✅ · {project}"
-    details = label + (f" · {model}" if model else "")
-    body = details + (f"\n{message}" if message else "")
     event_id = completion_id(payload, account)
     if outcome == "input":
         request_id = str(payload.get("request_id") or "").strip()
@@ -285,6 +329,22 @@ def dispatch(payload, account, outcome):
         })
         return 0
     t3_target = t3_thread_target(payload)
+    heading, detail_project, project, thread_title = resolve_notification_context(payload, t3_target)
+    if outcome == "input":
+        message = compact(markdown_to_plain_text(payload.get("input_message") or "The agent needs your input."))
+        title = f"Input ℹ️ · {heading}"
+    elif outcome == "failure":
+        message = compact(markdown_to_plain_text(
+            payload.get("error") or "The task failed."
+        ))
+        title = f"Failed ❌ · {heading}"
+    else:
+        message = compact(markdown_to_plain_text(
+            payload.get("last_assistant_message") or "Task completed."
+        ))
+        title = f"Finished ✅ · {heading}"
+    details = " · ".join(part for part in (detail_project, label, model) if part)
+    body = details + (f"\n{message}" if message else "")
 
     common = ["--title", title, "--body", body, "--account", account, "--project", project]
     identity = ["--event-id", event_id] if event_id else []
@@ -300,6 +360,7 @@ def dispatch(payload, account, outcome):
         "event": f"{outcome}-dispatched",
         "account": account,
         "project": project,
+        "thread_title": thread_title or None,
         "model": model,
         "session_id": payload.get("session_id"),
         "turn_id": payload.get("turn_id"),

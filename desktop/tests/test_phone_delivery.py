@@ -1,4 +1,5 @@
 import importlib.machinery
+import importlib.util
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,10 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "codex-phone-deliver"
 sys.path.insert(0, str(SCRIPT.parent))
-MODULE = importlib.machinery.SourceFileLoader("codex_phone_deliver", str(SCRIPT)).load_module()
+_LOADER = importlib.machinery.SourceFileLoader("codex_phone_deliver", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_phone_deliver", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 class PhoneDeliveryTests(unittest.TestCase):

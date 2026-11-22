@@ -1,4 +1,5 @@
 import importlib.machinery
+import importlib.util
 import json
 import os
 import sqlite3
@@ -13,9 +14,10 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "codex-alert-failure-watch"
 sys.path.insert(0, str(SCRIPT.parent))
-MODULE = importlib.machinery.SourceFileLoader(
-    "codex_alert_failure_watch", str(SCRIPT)
-).load_module()
+_LOADER = importlib.machinery.SourceFileLoader("codex_alert_failure_watch", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_alert_failure_watch", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 def context():
@@ -443,6 +445,38 @@ class T3EventTests(unittest.TestCase):
             self.assertEqual(payload["last_assistant_message"], "Implemented the fix.")
             self.assertEqual(payload["t3_thread_id"], "t3-thread")
             self.assertEqual(payload["turn_id"], "run-1")
+
+    def test_t3_events_include_thread_title_and_scratch_flag(self):
+        self.poll()
+        self.connection.execute(
+            "UPDATE projection_projects SET workspace_root = '/home/test/.t3/scratch'"
+        )
+        self.connection.execute(
+            "UPDATE orchestration_v2_projection_threads SET payload_json = ?",
+            (json.dumps({
+                "title": "Configure Google AI Pro for T3 Code",
+                "worktreePath": "/home/test/.t3/scratch/2026-11-20-i-want-to-setup-my-1e93e584",
+            }),),
+        )
+        self.connection.execute(
+            "UPDATE orchestration_v2_projection_provider_threads SET driver = 'antigravity'"
+        )
+        self.connection.execute(
+            "INSERT INTO orchestration_v2_projection_turn_items VALUES "
+            "('assistant-2', 't3-thread', 'run-1', 'root-node', 'assistant_message', "
+            "'completed', '', 1, 'provider-turn', ?, 'provider-thread')",
+            ('{"text":"Configured."}',),
+        )
+        self.publish("run.updated", {
+            "id": "run-1", "status": "completed", "providerThreadId": "provider-thread",
+        })
+        self.poll()
+
+        self.assertEqual(len(self.calls), 1)
+        payload, account = self.calls[0]
+        self.assertEqual(account, "antigravity")
+        self.assertEqual(payload["thread_title"], "Configure Google AI Pro for T3 Code")
+        self.assertTrue(payload["is_scratch"])
 
 
 if __name__ == "__main__":

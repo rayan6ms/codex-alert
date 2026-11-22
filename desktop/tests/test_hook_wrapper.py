@@ -1,14 +1,22 @@
 import importlib.machinery
+import importlib.util
 import io
 import json
+import sqlite3
+import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "codex-notify-stop"
-MODULE = importlib.machinery.SourceFileLoader("codex_notify_stop", str(SCRIPT)).load_module()
+sys.path.insert(0, str(SCRIPT.parent))
+_LOADER = importlib.machinery.SourceFileLoader("codex_notify_stop", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_notify_stop", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 class HookWrapperTests(unittest.TestCase):
@@ -203,6 +211,207 @@ class HookWrapperTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue()), {})
             handles.assert_called_once_with("claude-code", "session-1")
             dispatch.assert_not_called()
+
+    def test_t3_scratch_thread_uses_thread_title_for_desktop_and_phone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment_file = root / "environment-id"
+            environment_file.write_text("env-1\n", encoding="ascii")
+            database = root / "statev2.sqlite"
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE projection_projects (
+                        project_id TEXT, title TEXT, workspace_root TEXT
+                    );
+                    CREATE TABLE orchestration_v2_projection_threads (
+                        thread_id TEXT, project_id TEXT, title TEXT, deleted_at TEXT, payload_json TEXT
+                    );
+                    CREATE TABLE orchestration_v2_projection_provider_threads (
+                        thread_id TEXT, driver TEXT, provider_instance_id TEXT,
+                        payload_json TEXT, updated_at TEXT
+                    );
+                """)
+                connection.execute(
+                    "INSERT INTO projection_projects VALUES (?, ?, ?)",
+                    ("scratch-project", "No project", "/home/test/.t3/scratch"),
+                )
+                connection.execute(
+                    "INSERT INTO orchestration_v2_projection_threads VALUES (?, ?, ?, NULL, ?)",
+                    (
+                        "t3-thread-1",
+                        "scratch-project",
+                        "Configure Google AI Pro for T3 Code",
+                        json.dumps({
+                            "title": "Configure Google AI Pro for T3 Code",
+                            "worktreePath": "/home/test/.t3/scratch/2026-11-20-i-want-to-setup-my-1e93e584",
+                        }),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "t3-thread-1",
+                        "codex",
+                        "codex",
+                        '{"nativeThreadRef":{"nativeId":"codex-session-1"}}',
+                        "2026-11-22T19:00:00Z",
+                    ),
+                )
+
+            payload = {
+                "session_id": "codex-session-1",
+                "turn_id": "turn-1",
+                "cwd": "/home/test/.t3/scratch/2026-11-20-i-want-to-setup-my-1e93e584",
+                "model": "gpt-6.2-sol",
+                "last_assistant_message": "All set.",
+            }
+            with (
+                patch.object(MODULE, "T3_ENVIRONMENT_ID_FILE", environment_file),
+                patch.object(MODULE, "T3_CURRENT_DB", database),
+                patch.object(MODULE, "T3_LEGACY_DB", root / "missing.sqlite"),
+                patch.object(MODULE, "t3_enabled", return_value=True),
+                patch.object(MODULE, "remember_dispatch", return_value=True),
+                patch.object(MODULE, "phone_configured", return_value=True),
+                patch.object(MODULE, "launch", return_value=True) as launch,
+                patch.object(MODULE, "log"),
+            ):
+                self.assertEqual(MODULE.dispatch(payload, "codex", "completion"), 0)
+
+        self.assertEqual(launch.call_count, 2)
+        for call in launch.call_args_list:
+            command = call.args[0]
+            self.assertEqual(
+                command[command.index("--title") + 1],
+                "Finished ✅ · Configure Google AI Pro for T3 Code",
+            )
+            self.assertEqual(
+                command[command.index("--body") + 1],
+                "codex · gpt-6.2-sol\nAll set.",
+            )
+
+    def test_t3_project_thread_shows_thread_title_and_project_in_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment_file = root / "environment-id"
+            environment_file.write_text("env-1\n", encoding="ascii")
+            database = root / "statev2.sqlite"
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE projection_projects (
+                        project_id TEXT, title TEXT, workspace_root TEXT
+                    );
+                    CREATE TABLE orchestration_v2_projection_threads (
+                        thread_id TEXT, project_id TEXT, title TEXT, deleted_at TEXT, payload_json TEXT
+                    );
+                """)
+                connection.execute(
+                    "INSERT INTO projection_projects VALUES (?, ?, ?)",
+                    ("project-1", "Aresto", "/home/test/Documents/Projects/aresto"),
+                )
+                connection.execute(
+                    "INSERT INTO orchestration_v2_projection_threads VALUES (?, ?, ?, NULL, ?)",
+                    (
+                        "t3-thread-2",
+                        "project-1",
+                        "Refactor   checkout\nflow",
+                        json.dumps({"title": "Refactor   checkout\nflow"}),
+                    ),
+                )
+
+            payload = {
+                "t3_thread_id": "t3-thread-2",
+                "session_id": "native-1",
+                "turn_id": "turn-1",
+                "cwd": "/home/test/Documents/Projects/aresto",
+                "model": "gemini-4-neon",
+                "last_assistant_message": "Done.",
+            }
+            with (
+                patch.object(MODULE, "T3_ENVIRONMENT_ID_FILE", environment_file),
+                patch.object(MODULE, "T3_CURRENT_DB", database),
+                patch.object(MODULE, "T3_LEGACY_DB", root / "missing.sqlite"),
+                patch.object(MODULE, "t3_enabled", return_value=True),
+                patch.object(MODULE, "remember_dispatch", return_value=True),
+                patch.object(MODULE, "phone_configured", return_value=True),
+                patch.object(MODULE, "launch", return_value=True) as launch,
+                patch.object(MODULE, "log"),
+            ):
+                self.assertEqual(MODULE.dispatch(payload, "antigravity", "completion"), 0)
+
+        self.assertEqual(launch.call_count, 2)
+        for call in launch.call_args_list:
+            command = call.args[0]
+            self.assertEqual(
+                command[command.index("--title") + 1],
+                "Finished ✅ · Refactor checkout flow",
+            )
+            self.assertEqual(
+                command[command.index("--body") + 1],
+                "Aresto · Antigravity · gemini-4-neon\nDone.",
+            )
+
+    def test_codex_session_index_fallback_uses_latest_thread_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / ".codex"
+            codex_home.mkdir()
+            (codex_home / "auth.json").write_text("{}\n", encoding="utf-8")
+            (codex_home / "session_index.jsonl").write_text(
+                "\n".join([
+                    json.dumps({"id": "codex-cli-1", "thread_name": "Initial prompt snippet..."}),
+                    json.dumps({"id": "codex-cli-1", "thread_name": "Fix OAuth callback"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            payload = {
+                "session_id": "codex-cli-1",
+                "turn_id": "turn-1",
+                "cwd": "/home/test/Documents/Projects/my-app",
+                "model": "gpt-6.2-sol",
+                "last_assistant_message": "Fixed.",
+            }
+            with (
+                patch.object(MODULE, "T3_CURRENT_DB", root / "missing-v2.sqlite"),
+                patch.object(MODULE, "T3_LEGACY_DB", root / "missing-v1.sqlite"),
+                patch.object(MODULE, "t3_thread_target", return_value=None),
+                patch.object(MODULE, "remember_dispatch", return_value=True),
+                patch.object(MODULE, "phone_configured", return_value=True),
+                patch.object(MODULE, "launch", return_value=True) as launch,
+                patch.object(MODULE, "log"),
+                patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}, clear=False),
+            ):
+                self.assertEqual(MODULE.dispatch(payload, "codex", "completion"), 0)
+
+        self.assertEqual(launch.call_count, 2)
+        command = launch.call_args_list[0].args[0]
+        self.assertEqual(command[command.index("--title") + 1], "Finished ✅ · Fix OAuth callback")
+        self.assertEqual(command[command.index("--body") + 1], "my-app · codex · gpt-6.2-sol\nFixed.")
+
+    def test_scratch_thread_without_title_never_shows_scratch_folder_slug(self):
+        payload = {
+            "session_id": "unknown-session",
+            "turn_id": "turn-1",
+            "cwd": "/home/test/.t3/scratch/2026-11-20-i-want-to-setup-my-1e93e584",
+            "model": "gpt-6.2-sol",
+            "last_assistant_message": "Done.",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(MODULE, "T3_CURRENT_DB", root / "missing-v2.sqlite"),
+                patch.object(MODULE, "T3_LEGACY_DB", root / "missing-v1.sqlite"),
+                patch.object(MODULE, "t3_thread_target", return_value=None),
+                patch.object(MODULE, "codex_session_title", return_value=""),
+                patch.object(MODULE, "remember_dispatch", return_value=True),
+                patch.object(MODULE, "phone_configured", return_value=False),
+                patch.object(MODULE, "launch", return_value=True) as launch,
+                patch.object(MODULE, "log"),
+            ):
+                self.assertEqual(MODULE.dispatch(payload, "codex", "completion"), 0)
+
+        command = launch.call_args_list[0].args[0]
+        self.assertEqual(command[command.index("--title") + 1], "Finished ✅ · Agents Alert")
+        self.assertEqual(command[command.index("--body") + 1], "codex · gpt-6.2-sol\nDone.")
 
 
 if __name__ == "__main__":

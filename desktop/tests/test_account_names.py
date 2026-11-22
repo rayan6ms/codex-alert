@@ -1,4 +1,5 @@
 import importlib.machinery
+import importlib.util
 import os
 import sqlite3
 import sys
@@ -11,7 +12,10 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "codex-notify-stop"
 sys.path.insert(0, str(SCRIPT.parent))
-MODULE = importlib.machinery.SourceFileLoader("codex_notify_stop", str(SCRIPT)).load_module()
+_LOADER = importlib.machinery.SourceFileLoader("codex_notify_stop", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_notify_stop", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 class AccountNameTests(unittest.TestCase):

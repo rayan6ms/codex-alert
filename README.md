@@ -92,7 +92,9 @@ With T3 Code integration enabled, the watcher also reads new events from the
 local T3 Code database. It alerts when Antigravity or Claude Code completes a
 run in T3 Code. Pending questions and approvals send input alerts. Failed
 T3 Code runs, including OpenCode runs, send failure alerts with the provider's
-error when available.
+error when available. Notifications use the thread title when available (from
+T3 Code or Codex's session index), falling back to the project name instead of
+scratch directory slugs.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses

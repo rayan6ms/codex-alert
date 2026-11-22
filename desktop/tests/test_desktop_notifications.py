@@ -1,4 +1,5 @@
 import importlib.machinery
+import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -9,9 +10,10 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "codex-notify-stop-desktop"
 sys.path.insert(0, str(SCRIPT.parent))
-MODULE = importlib.machinery.SourceFileLoader(
-    "codex_notify_stop_desktop", str(SCRIPT)
-).load_module()
+_LOADER = importlib.machinery.SourceFileLoader("codex_notify_stop_desktop", str(SCRIPT))
+_SPEC = importlib.util.spec_from_loader("codex_notify_stop_desktop", _LOADER)
+MODULE = importlib.util.module_from_spec(_SPEC)
+_LOADER.exec_module(MODULE)
 
 
 class DesktopNotificationTests(unittest.TestCase):
