@@ -10,12 +10,23 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from codex_alert_common import T3_CURRENT_DB, open_t3_db, questions_text, t3_enabled
+from codex_alert_common import (
+    T3_CURRENT_DB,
+    open_t3_db,
+    questions_text,
+    t3_enabled,
+    t3_watcher_active,
+)
 
 
 CLAUDE = "claude-code"
 ANTIGRAVITY = "antigravity"
 PROVIDER_NAMES = {CLAUDE: "Claude Code", ANTIGRAVITY: "Antigravity"}
+PROVIDER_LABELS = {
+    **PROVIDER_NAMES,
+    "opencode": "OpenCode",
+    "cursor": "Cursor",
+}
 T3_PROVIDERS = {"claudeAgent": CLAUDE, "antigravity": ANTIGRAVITY}
 ANTIGRAVITY_HOOK_NAME = "agents-alert"
 
@@ -150,11 +161,13 @@ def antigravity_event(payload, event):
     return alert
 
 
-def t3_handles_session(provider, session_id, database=T3_CURRENT_DB):
+def t3_handles_session(provider, session_id, database=T3_CURRENT_DB, require_watcher=True):
     """Use the T3 event stream for its own runs when integration is enabled."""
     if not session_id or not t3_enabled() or not database.is_file():
         return False
-    driver = next(driver for driver, name in T3_PROVIDERS.items() if name == provider)
+    if require_watcher and not t3_watcher_active():
+        return False
+    driver = next((key for key, name in T3_PROVIDERS.items() if name == provider), provider)
     try:
         with closing(open_t3_db(database)) as connection:
             return connection.execute(

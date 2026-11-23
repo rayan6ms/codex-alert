@@ -588,18 +588,39 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         if event.get("delegatedTaskId") or not live_timestamp(event.get("completedAt") or occurred_at):
             return None
         turn_id, alert = None, {}
-        if not completed:
+        if completed:
+            provider_thread_id = event.get("providerThreadId")
+            summary = connection.execute(
+                """
+                SELECT substr(json_extract(payload_json, '$.text'), 1, 1201), provider_turn_id
+                FROM orchestration_v2_projection_turn_items
+                WHERE thread_id = ? AND run_id = ? AND type = 'assistant_message'
+                  AND (? IS NULL OR provider_thread_id = ?) AND status = 'completed'
+                ORDER BY ordinal DESC LIMIT 1
+                """,
+                (thread_id, event["id"], provider_thread_id, provider_thread_id),
+            ).fetchone()
+            alert["last_assistant_message"] = compact(summary[0]) if summary else ""
+            turn_id = summary[1] if summary else None
+        else:
             failure = connection.execute(
                 """
                 SELECT provider_turn_id, json_extract(payload_json, '$.failure.message')
                 FROM orchestration_v2_projection_turn_items
-                WHERE thread_id = ? AND run_id = ? AND node_id = ?
+                WHERE thread_id = ? AND run_id = ?
                   AND type = 'error' AND status = 'failed'
-                ORDER BY updated_at DESC, ordinal DESC, turn_item_id DESC LIMIT 1
+                ORDER BY (node_id = ?) DESC, updated_at DESC, ordinal DESC, turn_item_id DESC
+                LIMIT 1
                 """,
                 (thread_id, event["id"], event.get("rootNodeId")),
             ).fetchone()
             turn_id, message = failure or (None, None)
+            if not message:
+                run_failure = event.get("failure")
+                if isinstance(run_failure, dict):
+                    message = run_failure.get("message")
+                elif event.get("error"):
+                    message = event.get("error")
             alert["error"] = compact(message) or "The T3 Code run failed."
         fallback_turn_id = event["id"]
     else:
@@ -614,14 +635,22 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         ).fetchone()
         if not pending:
             return None
-        is_approval = event["type"] == "approval_request"
+        item_type = event.get("type")
+        is_approval = item_type == "approval_request"
+        is_secret = item_type == "secret_request"
         native_item = event.get("nativeItemRef") or {}
-        native_request_id = None if is_approval else native_item.get("nativeId")
+        native_request_id = None if (is_approval or is_secret) else native_item.get("nativeId")
         request_id = native_request_id or event.get("requestId") or event["id"]
-        message = compact(questions_text(event.get("questions")) or event.get("prompt"))
-        fallback_message = (
-            "T3 Code needs your approval." if is_approval else "T3 Code needs your input."
-        )
+        if is_secret:
+            label = compact(event.get("label") or event.get("title"), 200)
+            reason = compact(event.get("reason") or event.get("prompt"), 900)
+            message = f"{label}: {reason}" if (label and reason) else (label or reason)
+            fallback_message = "T3 Code needs a secret or credential."
+        else:
+            message = compact(questions_text(event.get("questions")) or event.get("prompt"))
+            fallback_message = (
+                "T3 Code needs your approval." if is_approval else "T3 Code needs your input."
+            )
         alert = {"request_id": request_id, "input_message": message or fallback_message}
         turn_id = event.get("providerTurnId")
         fallback_turn_id = turn_id or ""
@@ -658,20 +687,6 @@ def t3_event_alert(connection, thread_id, occurred_at, event_type, event):
         return None
 
     session_id, native_turn_id, cwd, model, instance_id, driver, raw_title, workspace_root = context
-    if completed:
-        if driver not in T3_PROVIDERS:
-            return None
-        summary = connection.execute(
-            """
-            SELECT substr(json_extract(payload_json, '$.text'), 1, 1201)
-            FROM orchestration_v2_projection_turn_items
-            WHERE thread_id = ? AND run_id = ? AND type = 'assistant_message'
-              AND provider_thread_id = ? AND status = 'completed'
-            ORDER BY ordinal DESC LIMIT 1
-            """,
-            (thread_id, event["id"], event.get("providerThreadId")),
-        ).fetchone()
-        alert["last_assistant_message"] = compact(summary[0]) if summary else ""
     alert.update(
         session_id=session_id or thread_id,
         turn_id=native_turn_id or fallback_turn_id,
@@ -727,7 +742,7 @@ class T3Events:
                       AND CASE event_type
                           WHEN 'run.updated' THEN json_extract(payload_json, '$.status') IN ('completed', 'failed')
                           WHEN 'turn-item.updated' THEN
-                            json_extract(payload_json, '$.type') IN ('user_input_request', 'approval_request')
+                            json_extract(payload_json, '$.type') IN ('user_input_request', 'approval_request', 'secret_request')
                             AND json_extract(payload_json, '$.status') IN ('pending', 'waiting')
                           ELSE 0
                       END

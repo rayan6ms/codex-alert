@@ -12,10 +12,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 LockPersonality=true
-MemoryHigh=64M
-MemoryMax=96M
-CPUQuota=10%
-TasksMax=8
+MemoryHigh=128M
+MemoryMax=256M
+CPUQuota=25%
+TasksMax=64
 
 [Install]
 WantedBy=default.target

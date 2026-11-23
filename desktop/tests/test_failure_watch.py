@@ -423,7 +423,7 @@ class T3EventTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0]["input_message"], "Allow?")
 
-    def test_t3_sends_completions_for_claude_and_antigravity(self):
+    def test_t3_sends_completions_for_all_providers(self):
         self.poll()
         self.connection.execute(
             "INSERT INTO orchestration_v2_projection_turn_items VALUES "
@@ -431,20 +431,42 @@ class T3EventTests(unittest.TestCase):
             "'completed', '', 1, 'provider-turn', ?, 'provider-thread')",
             ('{"text":"Implemented the fix."}',),
         )
-        for driver in ("opencode", "codex", "antigravity", "claudeAgent"):
+        for driver in ("opencode", "codex", "antigravity", "claudeAgent", "cursor"):
             self.connection.execute(
-                "UPDATE orchestration_v2_projection_provider_threads SET driver = ?", (driver,),
+                "UPDATE orchestration_v2_projection_provider_threads SET driver = ?, "
+                "provider_instance_id = ?",
+                (driver, driver),
+            )
+            self.connection.execute(
+                "UPDATE orchestration_v2_projection_runs SET provider_instance_id = ?",
+                (driver,),
             )
             self.publish("run.updated", {
                 "id": "run-1", "status": "completed", "providerThreadId": "provider-thread",
             })
             self.poll()
 
-        self.assertEqual([account for _, account in self.calls], ["antigravity", "claude-code"])
+        self.assertEqual(
+            [account for _, account in self.calls],
+            ["opencode", "codex", "antigravity", "claude-code", "cursor"],
+        )
         for payload, _ in self.calls:
             self.assertEqual(payload["last_assistant_message"], "Implemented the fix.")
             self.assertEqual(payload["t3_thread_id"], "t3-thread")
-            self.assertEqual(payload["turn_id"], "run-1")
+            self.assertEqual(payload["turn_id"], "native-turn")
+
+    def test_t3_secret_request_sends_input_alert(self):
+        self.poll()
+        self.request(
+            "secret_request",
+            label="Sudo password",
+            reason="Needed to inspect Waydroid.",
+        )
+        self.poll()
+        self.assertEqual(len(self.calls), 1)
+        payload, _ = self.calls[0]
+        self.assertEqual(payload["request_id"], "secret_request-waiting")
+        self.assertEqual(payload["input_message"], "Sudo password: Needed to inspect Waydroid.")
 
     def test_t3_events_include_thread_title_and_scratch_flag(self):
         self.poll()

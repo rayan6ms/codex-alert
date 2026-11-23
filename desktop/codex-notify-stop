@@ -14,6 +14,7 @@ from pathlib import Path
 from agents_alert_providers import (
     ANTIGRAVITY,
     CLAUDE,
+    PROVIDER_LABELS,
     PROVIDER_NAMES,
     T3_PROVIDERS,
     antigravity_event,
@@ -311,7 +312,7 @@ def launch(command):
 
 def dispatch(payload, account, outcome):
     model = compact(payload.get("model"), 100)
-    label = PROVIDER_NAMES.get(account, account)
+    label = PROVIDER_LABELS.get(account, account)
     event_id = completion_id(payload, account)
     if outcome == "input":
         request_id = str(payload.get("request_id") or "").strip()
@@ -417,6 +418,19 @@ def main():
             "event": "ephemeral-completion-ignored",
             "account": account,
             "model": compact(payload.get("model"), 100),
+            "session_id": payload.get("session_id"),
+            "turn_id": payload.get("turn_id"),
+        })
+        result = 0
+    elif (
+        not args.waiting_input
+        and not args.failure
+        and not payload.get("t3_thread_id")
+        and t3_handles_session("codex", payload.get("session_id"))
+    ):
+        log({
+            "event": "t3-completion-deferred",
+            "account": account,
             "session_id": payload.get("session_id"),
             "turn_id": payload.get("turn_id"),
         })

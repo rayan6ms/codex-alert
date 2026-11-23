@@ -88,13 +88,14 @@ Claude Code alerts cover completed responses, terminal API errors, questions,
 and tool approval requests. Antigravity alerts cover completed executions,
 terminal errors or step limits, and questions raised through `ask_question`.
 
-With T3 Code integration enabled, the watcher also reads new events from the
-local T3 Code database. It alerts when Antigravity or Claude Code completes a
-run in T3 Code. Pending questions and approvals send input alerts. Failed
-T3 Code runs, including OpenCode runs, send failure alerts with the provider's
-error when available. Notifications use the thread title when available (from
-T3 Code or Codex's session index), falling back to the project name instead of
-scratch directory slugs.
+With T3 Code integration enabled, the watcher follows T3 Code's own run status
+and pending requests in the local T3 Code database for every provider T3 Code
+runs (Codex, Antigravity, Claude Code, OpenCode, Cursor, and any future
+provider). Completed runs, failed runs, and pending user questions, approval
+prompts, or secret requests all alert from T3 Code's state, while native hooks
+continue handling standalone CLI and IDE sessions outside T3 Code. Notifications
+use the thread title when available (from T3 Code or Codex's session index),
+falling back to the project name instead of scratch directory slugs.
 
 On GNOME, a phone alert is also dismissed after the first new keyboard or
 pointer activity on the paired desktop following that completion. This uses

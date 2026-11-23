@@ -212,6 +212,63 @@ class HookWrapperTests(unittest.TestCase):
             handles.assert_called_once_with("claude-code", "session-1")
             dispatch.assert_not_called()
 
+    def test_codex_native_stop_hook_defers_for_t3_managed_sessions(self):
+        with (
+            patch.object(MODULE, "is_ephemeral_codex_exec", return_value=False),
+            patch.object(MODULE, "t3_handles_session", return_value=True) as handles,
+            patch.object(MODULE, "dispatch") as dispatch,
+            patch.object(MODULE, "log"),
+            patch("sys.argv", [str(SCRIPT)]),
+            patch("sys.stdin", io.StringIO('{"session_id":"codex-session-1","turn_id":"turn-1"}')),
+            patch("sys.stdout", io.StringIO()) as stdout,
+        ):
+            self.assertEqual(MODULE.main(), 0)
+            self.assertEqual(json.loads(stdout.getvalue()), {})
+            handles.assert_called_once_with("codex", "codex-session-1")
+            dispatch.assert_not_called()
+
+    def test_t3_dispatched_codex_completion_is_not_deferred(self):
+        payload = json.dumps({
+            "session_id": "codex-session-1",
+            "turn_id": "turn-1",
+            "t3_thread_id": "t3-thread-1",
+            "cwd": "/tmp/project",
+            "last_assistant_message": "Done.",
+        })
+        with (
+            patch.object(MODULE, "is_ephemeral_codex_exec", return_value=False),
+            patch.object(MODULE, "t3_handles_session", return_value=True) as handles,
+            patch.object(MODULE, "dispatch", return_value=0) as dispatch,
+            patch("sys.argv", [str(SCRIPT), "--account", "codex"]),
+            patch("sys.stdin", io.StringIO(payload)),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(MODULE.main(), 0)
+            handles.assert_not_called()
+            dispatch.assert_called_once()
+
+    def test_t3_handles_session_checks_watcher_and_supports_codex(self):
+        import agents_alert_providers as providers
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "statev2.sqlite"
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.executescript("""
+                    CREATE TABLE orchestration_v2_projection_provider_threads (
+                        provider_thread_id TEXT, driver TEXT, payload_json TEXT
+                    );
+                    CREATE TABLE orchestration_v2_projection_runs (
+                        provider_thread_id TEXT, status TEXT, completed_at TEXT
+                    );
+                    INSERT INTO orchestration_v2_projection_provider_threads VALUES
+                        ('pt-1', 'codex', '{"nativeThreadRef":{"nativeId":"codex-sess"}}');
+                    INSERT INTO orchestration_v2_projection_runs VALUES ('pt-1', 'running', NULL);
+                """)
+            with patch.object(providers, "t3_enabled", return_value=True):
+                with patch.object(providers, "t3_watcher_active", return_value=False):
+                    self.assertFalse(providers.t3_handles_session("codex", "codex-sess", database))
+                with patch.object(providers, "t3_watcher_active", return_value=True):
+                    self.assertTrue(providers.t3_handles_session("codex", "codex-sess", database))
+
     def test_t3_scratch_thread_uses_thread_title_for_desktop_and_phone(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

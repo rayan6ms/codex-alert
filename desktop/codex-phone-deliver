@@ -7,6 +7,7 @@ import fcntl
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -172,7 +173,32 @@ def queue_depth(connection):
     return int(connection.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0])
 
 
-def desktop_activity_stamp():
+def desktop_activity_stamp_gdbus():
+    if not GDBUS:
+        return None
+    returncode, _, output = run(
+        [
+            GDBUS,
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+        1.5,
+    )
+    if returncode != 0:
+        return None
+    match = re.search(r"\b(\d+)\b", output)
+    if not match:
+        return None
+    return time.monotonic_ns() - int(match.group(1)) * 1_000_000
+
+
+def desktop_activity_stamp(prefer_subprocess=False):
     """Return the approximate monotonic timestamp of the last physical input.
 
     GNOME's idle monitor is session-scoped, needs no elevated input access, and
@@ -180,6 +206,10 @@ def desktop_activity_stamp():
     whether input happened after a particular completion without recording any
     keys, buttons, or pointer coordinates.
     """
+    if prefer_subprocess:
+        stamp = desktop_activity_stamp_gdbus()
+        if stamp is not None:
+            return stamp
     try:
         import gi
         gi.require_version("Gio", "2.0")
@@ -200,7 +230,7 @@ def desktop_activity_stamp():
         idle_milliseconds = int(result.unpack()[0])
         return time.monotonic_ns() - idle_milliseconds * 1_000_000
     except Exception:
-        return None
+        return None if prefer_subprocess else desktop_activity_stamp_gdbus()
 
 
 def load_active_alert():
@@ -640,7 +670,7 @@ def activate_worker():
 def enqueue(args):
     now = time.time()
     event_id = args.event_id or str(uuid.uuid4())
-    presence_baseline = desktop_activity_stamp()
+    presence_baseline = desktop_activity_stamp(prefer_subprocess=True)
     with closing(connect_db()) as connection:
         connection.execute(
             "DELETE FROM delivery_history WHERE delivered_at < ?",

@@ -1,5 +1,6 @@
 """Shared configuration helpers for the Agents Alert desktop companion."""
 
+import fcntl
 import json
 import os
 import sqlite3
@@ -83,6 +84,23 @@ def settings():
 
 def t3_enabled():
     return settings().get("t3_integration") is True
+
+
+def t3_watcher_active(lock_file=None):
+    """Return True when the background watcher currently holds its lock."""
+    path = (STATE_DIR / "failure-watch.lock") if lock_file is None else Path(lock_file)
+    if not path.is_file():
+        return False
+    try:
+        with path.open("a+", encoding="utf-8") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False
 
 
 def set_t3_enabled(enabled):

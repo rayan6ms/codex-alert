@@ -170,5 +170,13 @@ class PhoneDeliveryTests(unittest.TestCase):
 
         self.assertEqual(MODULE.load_active_alert()["event_id"], "event-new")
 
+    def test_desktop_activity_stamp_gdbus_parses_idle_time(self):
+        with (
+            patch.object(MODULE, "GDBUS", "/usr/bin/gdbus"),
+            patch.object(MODULE, "run", return_value=(0, "", "(uint64 2500,)")),
+            patch.object(MODULE.time, "monotonic_ns", return_value=10_000_000_000),
+        ):
+            self.assertEqual(MODULE.desktop_activity_stamp_gdbus(), 7_500_000_000)
+
 if __name__ == "__main__":
     unittest.main()
