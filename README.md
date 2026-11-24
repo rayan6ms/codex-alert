@@ -105,8 +105,11 @@ the key pressed, button clicked, or pointer position.
 Pair while both devices are on the same trusted Wi-Fi network. The app guides
 you to battery settings only if your phone restricts background delivery.
 
-Want alerts outside your home network? Turn on Tailscale on both devices before
-pairing. It is optional; no port forwarding is needed.
+Want alerts outside your home network? Turn on Tailscale on both devices
+(before or after pairing). Agents Alert automatically discovers your paired
+Android device over Tailscale, verifies it against the pinned certificate and
+token, and remembers its Tailscale address. It is optional; no port forwarding
+is needed.
 
 ## Optional T3 Code integration
 

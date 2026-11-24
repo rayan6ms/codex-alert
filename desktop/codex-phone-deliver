@@ -5,6 +5,7 @@
 import argparse
 import fcntl
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from codex_alert_common import (
     PHONE_FILE,
     STATE_DIR,
     TOKEN_FILE,
+    atomic_json,
     phone,
 )
 
@@ -342,18 +344,63 @@ def discover_lan_targets():
     return targets
 
 
+def discover_tailscale_targets():
+    binary = shutil.which("tailscale")
+    if not binary:
+        return []
+    returncode, _, output = run([binary, "status", "--json"], 3)
+    if returncode != 0 or not output:
+        return []
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return []
+    if not isinstance(data, dict) or data.get("BackendState") != "Running":
+        return []
+    peers = data.get("Peer")
+    if not isinstance(peers, dict):
+        return []
+    candidates = [
+        peer for peer in peers.values()
+        if isinstance(peer, dict)
+        and str(peer.get("OS") or "").lower() == "android"
+        and (peer.get("Online") is True or peer.get("Active") is True)
+    ]
+    candidates.sort(key=lambda peer: (peer.get("Active") is not True, str(peer.get("HostName") or "")))
+    ipv4_targets = []
+    ipv6_targets = []
+    seen = set()
+    for peer in candidates:
+        ips = peer.get("TailscaleIPs")
+        if not isinstance(ips, list):
+            continue
+        for raw in ips:
+            host = str(raw or "").strip()
+            if not host or host in seen or transport_for_host(host) != "tailscale-direct":
+                continue
+            try:
+                address = ipaddress.ip_address(host.split("%", 1)[0])
+            except ValueError:
+                continue
+            seen.add(host)
+            if address.version == 4:
+                ipv4_targets.append(("tailscale-discovered", host))
+            else:
+                ipv6_targets.append(("tailscale-discovered", host))
+    return [*ipv4_targets, *ipv6_targets]
+
+
 def direct_targets(skip_lan=False, skip_tailscale=False):
     """Yield paired and discovered targets without embedding device addresses."""
     seen = set()
     if not skip_lan:
         for host in phone().get("targets", []):
             host = str(host).strip()
-            transport = transport_for_host(host)
-            if transport != "lan-direct":
+            if not host or transport_for_host(host) != "lan-direct":
                 continue
             if host not in seen:
                 seen.add(host)
-                yield transport, host
+                yield "lan-direct", host
         for transport, host in discover_lan_targets():
             if host not in seen:
                 seen.add(host)
@@ -362,19 +409,46 @@ def direct_targets(skip_lan=False, skip_tailscale=False):
         return
     for host in phone().get("targets", []):
         host = str(host).strip()
-        transport = transport_for_host(host)
-        if transport != "tailscale-direct":
+        if not host or transport_for_host(host) != "tailscale-direct":
             continue
+        if host not in seen:
+            seen.add(host)
+            yield "tailscale-direct", host
+    for transport, host in discover_tailscale_targets():
         if host not in seen:
             seen.add(host)
             yield transport, host
 
 
+def remember_target(host):
+    """Persist a certificate-pinned, authenticated discovered phone target."""
+    host = str(host or "").strip()
+    if not host or not PHONE_FILE.is_file():
+        return False
+    config = phone()
+    if not isinstance(config, dict) or not config.get("certificate_sha256"):
+        return False
+    existing = [str(item).strip() for item in config.get("targets", []) if str(item).strip()]
+    kind = transport_for_host(host)
+    same_kind = [host, *(item for item in existing if item != host and transport_for_host(item) == kind)][:2]
+    other_kind = [item for item in existing if transport_for_host(item) != kind]
+    updated = [*same_kind, *other_kind] if kind == "lan-direct" else [*other_kind, *same_kind]
+    if updated == existing:
+        return False
+    config["targets"] = updated
+    try:
+        atomic_json(PHONE_FILE, config)
+        log(event="target-learned", target=host, transport=kind)
+        return True
+    except OSError:
+        return False
+
+
 def transport_for_host(host):
     value = host.strip("[]").lower()
     try:
-        address = __import__("ipaddress").ip_address(value.split("%", 1)[0])
-        if address in __import__("ipaddress").ip_network("100.64.0.0/10"):
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+        if address in ipaddress.ip_network("100.64.0.0/10"):
             return "tailscale-direct"
         if address.version == 6 and value.startswith("fd7a:115c:a1e0:"):
             return "tailscale-direct"
@@ -404,7 +478,8 @@ def try_request(
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    connection = http.client.HTTPSConnection(host, PORT, timeout=4, context=context)
+    timeout = 6 if transport.startswith("tailscale-") else 3
+    connection = http.client.HTTPSConnection(host, PORT, timeout=timeout, context=context)
     try:
         connection.request(
             "POST", path, body=payload,
@@ -480,6 +555,8 @@ def clear_event(event_id):
             "clear-attempt",
         )
         if success:
+            if transport in ("lan-mdns", "tailscale-discovered"):
+                remember_target(host)
             return True, transport, result
         errors.append(f"{transport} {host}: {error}")
     return False, "", compact(" | ".join(errors), 1200)
@@ -567,6 +644,8 @@ def deliver(event):
     for transport, host in direct_targets(skip_lan, skip_tailscale):
         success, error = try_direct(host, transport, event, token, context)
         if success:
+            if transport in ("lan-mdns", "tailscale-discovered"):
+                remember_target(host)
             return True, transport, ""
         errors.append(f"{transport} {host}: {error}")
 

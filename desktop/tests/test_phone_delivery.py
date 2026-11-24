@@ -68,13 +68,14 @@ class PhoneDeliveryTests(unittest.TestCase):
             self.assertEqual(event["thread_id"], "thread-1")
             self.assertEqual(event["presence_baseline"], 1_000_000_000)
 
+    @patch.object(MODULE, "discover_tailscale_targets", return_value=[])
     @patch.object(MODULE, "discover_lan_targets", return_value=[("lan-mdns", "192.168.1.50")])
     @patch.object(
         MODULE,
         "phone",
         return_value={"targets": ["192.168.1.50", "phone.example.ts.net", "100.64.0.42"]},
     )
-    def test_direct_targets_are_deduplicated_and_include_tailscale(self, _phone, _discover):
+    def test_direct_targets_are_deduplicated_and_include_tailscale(self, _phone, _discover, _ts):
         targets = list(MODULE.direct_targets())
         self.assertEqual(targets.count(("lan-direct", "192.168.1.50")), 1)
         self.assertIn(("tailscale-direct", "phone.example.ts.net"), targets)
@@ -88,13 +89,14 @@ class PhoneDeliveryTests(unittest.TestCase):
         self.assertEqual(next(targets), ("lan-direct", "192.168.1.50"))
         discover.assert_not_called()
 
+    @patch.object(MODULE, "discover_tailscale_targets", return_value=[])
     @patch.object(MODULE, "discover_lan_targets")
     @patch.object(
         MODULE,
         "phone",
         return_value={"targets": ["192.168.1.50", "phone.example.ts.net"]},
     )
-    def test_skip_lan_avoids_discovery(self, _phone, discover):
+    def test_skip_lan_avoids_discovery(self, _phone, discover, _ts):
         targets = list(MODULE.direct_targets(skip_lan=True))
         discover.assert_not_called()
         self.assertTrue(all(transport == "tailscale-direct" for transport, _ in targets))
@@ -177,6 +179,79 @@ class PhoneDeliveryTests(unittest.TestCase):
             patch.object(MODULE.time, "monotonic_ns", return_value=10_000_000_000),
         ):
             self.assertEqual(MODULE.desktop_activity_stamp_gdbus(), 7_500_000_000)
+
+    def test_tailscale_discovery_returns_online_android_peers_ipv4_first(self):
+        status = {
+            "BackendState": "Running",
+            "Peer": {
+                "offline-phone": {
+                    "HostName": "old-phone",
+                    "OS": "android",
+                    "Online": False,
+                    "Active": False,
+                    "TailscaleIPs": ["100.122.51.96"],
+                },
+                "linux-box": {
+                    "HostName": "server",
+                    "OS": "linux",
+                    "Online": True,
+                    "Active": True,
+                    "TailscaleIPs": ["100.87.52.98"],
+                },
+                "online-phone": {
+                    "HostName": "redmi",
+                    "OS": "android",
+                    "Online": True,
+                    "Active": True,
+                    "TailscaleIPs": ["fd7a:115c:a1e0::8e38:d763", "100.122.215.98"],
+                },
+            },
+        }
+        with (
+            patch.object(MODULE.shutil, "which", return_value="/usr/bin/tailscale"),
+            patch.object(MODULE, "run", return_value=(0, "", __import__("json").dumps(status))),
+        ):
+            targets = MODULE.discover_tailscale_targets()
+        self.assertEqual(
+            targets,
+            [
+                ("tailscale-discovered", "100.122.215.98"),
+                ("tailscale-discovered", "fd7a:115c:a1e0::8e38:d763"),
+            ],
+        )
+
+    def test_direct_targets_falls_back_to_discovered_tailscale_peers(self):
+        with (
+            patch.object(MODULE, "phone", return_value={"targets": ["192.168.0.227"]}),
+            patch.object(MODULE, "discover_lan_targets", return_value=[]),
+            patch.object(
+                MODULE,
+                "discover_tailscale_targets",
+                return_value=[("tailscale-discovered", "100.122.215.98")],
+            ),
+        ):
+            self.assertEqual(
+                list(MODULE.direct_targets()),
+                [
+                    ("lan-direct", "192.168.0.227"),
+                    ("tailscale-discovered", "100.122.215.98"),
+                ],
+            )
+
+    def test_remember_target_saves_verified_tailscale_ip_and_bounds_stale_entries(self):
+        phone_file = Path(self.temporary.name) / "phone.json"
+        phone_file.write_text(
+            '{"version":1,"targets":["192.168.0.227"],"certificate_sha256":"abc"}\n',
+            encoding="utf-8",
+        )
+        with (
+            patch.object(MODULE, "PHONE_FILE", phone_file),
+            patch.object(MODULE, "phone", side_effect=lambda: __import__("json").loads(phone_file.read_text(encoding="utf-8"))),
+        ):
+            self.assertTrue(MODULE.remember_target("100.122.215.98"))
+            self.assertFalse(MODULE.remember_target("100.122.215.98"))
+            saved = __import__("json").loads(phone_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved["targets"], ["192.168.0.227", "100.122.215.98"])
 
 if __name__ == "__main__":
     unittest.main()
